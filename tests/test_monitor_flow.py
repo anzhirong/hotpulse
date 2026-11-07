@@ -128,24 +128,54 @@ class FakeFetcher:
 
 
 class FakeContext:
-    def __init__(self) -> None:
+    def __init__(self, provider=None) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.provider = provider
 
     async def send_message(self, session, chain) -> bool:
         self.sent.append((session, chain.text))
         return True
 
+    def get_using_provider(self):
+        return self.provider
 
-def make_plugin(tmp_path: Path, keywords: list[str], sessions: list[str] | None = None):
+
+class FakeProvider:
+    """假的 AstrBot 模型提供方，记录被调了几次。"""
+
+    def __init__(self, text: str = "", error: Exception | None = None) -> None:
+        self.text = text
+        self.error = error
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    async def text_chat(self, prompt=None, system_prompt=None):
+        self.calls += 1
+        self.prompts.append(prompt or "")
+        if self.error is not None:
+            raise self.error
+        return types.SimpleNamespace(completion_text=self.text)
+
+
+def make_plugin(
+    tmp_path: Path,
+    keywords: list[str],
+    sessions: list[str] | None = None,
+    provider=None,
+    config: dict | None = None,
+):
     store_path = tmp_path / "subscriptions.json"
     store = SubscriptionStore(
         path=store_path, keywords=list(keywords), sessions=list(sessions or [])
     )
-    plugin = main.HotPulsePlugin(
-        FakeContext(),
+    base = {
         # quiet_start == quiet_end 表示不静默，测试不受跑测试的时刻影响
-        config={"quiet_start": 0, "quiet_end": 0, "monitor_interval": 1800},
-    )
+        "quiet_start": 0,
+        "quiet_end": 0,
+        "monitor_interval": 1800,
+    }
+    base.update(config or {})
+    plugin = main.HotPulsePlugin(FakeContext(provider), config=base)
     plugin._store = store
     return plugin
 
@@ -564,3 +594,82 @@ def test_push_keeps_links_and_platform_summary():
     # 预览与正式推送只有抬头不同
     assert "当前在榜" in main._render_new(clusters, preview=True)
     assert "新上榜" in text
+
+
+# ---------- AI 一句话解读 ----------
+
+
+def test_parse_briefs_aligns_by_number():
+    text = """1. 讲的是某地暴雨预警，出行要看天气
+2、模型自己用了顿号
+3) 这条太短
+7. 编号越界，应该被丢掉
+4. 解读：某某公司发布了新芯片，主打能效
+"""
+    briefs = main._parse_briefs(text, 4)
+    assert briefs[0].startswith("讲的是某地暴雨")
+    assert briefs[1].startswith("模型自己用了顿号")
+    assert briefs[2] == ""  # 太短不当解读
+    assert briefs[3].startswith("某某公司发布了新芯片")  # 前缀被去掉
+
+
+def test_parse_briefs_truncates_long_line():
+    briefs = main._parse_briefs("1. " + "很" * 200, 1)
+    assert len(briefs[0]) == 61  # 60 字 + 省略号
+    assert briefs[0].endswith("…")
+
+
+def test_ai_brief_appears_in_push(tmp_path):
+    provider = FakeProvider("1. 说有骗子用 AI 批量做短视频引流\n2. 另一条新闻的简单说明")
+    plugin = make_plugin(tmp_path, ["AI"], ["lark:a"], provider=provider)
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 视频引流", "AI 另一条消息"])})
+
+    run(plugin._monitor_once(announce_session="lark:a"))
+
+    text = plugin.context.sent[0][1]
+    assert "💭 说有骗子用 AI 批量做短视频引流" in text
+    assert "AI 根据标题推测" in text  # 必须声明不是原文
+    assert provider.calls == 1  # 10 条标题只调一次模型
+
+
+def test_ai_brief_failure_does_not_block_push(tmp_path):
+    provider = FakeProvider(error=RuntimeError("401 模型未授权"))
+    plugin = make_plugin(tmp_path, ["AI"], ["lark:a"], provider=provider)
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 视频引流"])})
+
+    run(plugin._monitor_once(announce_session="lark:a"))
+
+    assert plugin.context.sent  # 模型挂了，推送照发
+    assert "💭" not in plugin.context.sent[0][1]
+
+
+def test_ai_brief_can_be_disabled(tmp_path):
+    provider = FakeProvider("1. 不该被用到的解读")
+    plugin = make_plugin(
+        tmp_path, ["AI"], ["lark:a"], provider=provider, config={"ai_brief": False}
+    )
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 视频引流"])})
+
+    run(plugin._monitor_once(announce_session="lark:a"))
+
+    assert provider.calls == 0
+    assert "💭" not in plugin.context.sent[0][1]
+
+
+def test_platform_summary_wins_over_ai_brief():
+    """B站简介是真原文，有它就别再叠一行 AI 推测。"""
+    clusters = core.cluster_hits(
+        [
+            (
+                "B站热门",
+                HotItem(
+                    rank=1,
+                    title="AI 视频引流",
+                    summary="这是视频作者自己写的简介，属于原文内容不是推测",
+                ),
+            )
+        ]
+    )
+    text = main._render_new(clusters, briefs=["模型对这条的推测"])
+    assert "这是视频作者自己写的简介" in text
+    assert "💭" not in text

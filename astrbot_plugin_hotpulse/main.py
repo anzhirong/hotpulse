@@ -6,6 +6,7 @@
 
 import asyncio
 import importlib.util
+import re
 import shutil
 import sys
 from datetime import datetime
@@ -111,6 +112,42 @@ _HELP = (
 # 这些不是摘要，只是平台的标记，显示出来反而误导
 _NOISE_SUMMARY = {"新事件上榜", "热门", "热榜", "置顶", "刚刚", "热点"}
 
+# AI 解读：只根据标题转述，不允许补事实。热榜接口没有正文，能拿到的只有标题，
+# 所以这里定位是「把标题说人话」，不是「总结新闻」。每条会带 💭 前缀并在末尾声明。
+_BRIEF_SYSTEM = (
+    "你是新闻编辑助手。用户给你若干条热点标题，你给每条补一句中文说明，"
+    "讲清「这是什么 / 大概为什么上榜」。\n"
+    "硬性要求：只能依据标题里已经出现的信息，绝对不要编造数字、人名、时间、结论；"
+    "标题信息不足以判断时，就做字面转述，不要猜。\n"
+    "每条不超过 40 字，口语化。严格按原编号一行一条输出，格式为「1. 说明」，"
+    "不要加标题、不要解释你在做什么。"
+)
+
+# 「1. 说明」「1、说明」「1)说明」都收
+_BRIEF_LINE = re.compile(r"^\s*(\d{1,2})\s*[.、)．]\s*(.+?)\s*$")
+
+
+def _parse_briefs(text: str, count: int) -> list[str]:
+    """把模型输出按编号对回标题。对不上、太短、太长的都丢掉，宁可空着。"""
+    briefs = [""] * count
+    for line in (text or "").splitlines():
+        matched = _BRIEF_LINE.match(line)
+        if not matched:
+            continue
+        index = int(matched.group(1)) - 1
+        if not 0 <= index < count:
+            continue
+        body = matched.group(2).strip()
+        # 模型有时会自己加「解读：」前缀
+        for prefix in ("解读：", "解读:", "说明：", "说明:"):
+            if body.startswith(prefix):
+                body = body[len(prefix) :].strip()
+        if len(body) < 6:
+            # 太短的没信息量（「同上」「略」这种），宁可空着
+            continue
+        briefs[index] = body if len(body) <= 60 else body[:60] + "…"
+    return briefs
+
 
 def _fmt_hot(value) -> str:
     """热度数值统一成「万/亿」，没有数值就返回空串。"""
@@ -192,7 +229,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.6")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.4.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -543,7 +580,8 @@ class HotPulsePlugin(Star):
             return
 
         clusters = cluster_hits(hits)
-        text = _render_new(clusters, preview=preview)
+        briefs = await self._ai_brief(clusters)
+        text = _render_new(clusters, preview=preview, briefs=briefs)
         delivered = 0
         for session in targets:
             try:
@@ -562,6 +600,54 @@ class HotPulsePlugin(Star):
             len(clusters),
             delivered,
         )
+
+    async def _ai_brief(self, clusters) -> list[str]:
+        """用 AstrBot 当前使用的模型，给每条热榜补一句「这是什么」。
+
+        前提说清楚：热榜接口只有标题，正文抓不到（36氪 详情页被火山引擎安全检测
+        挡、头条要求执行 JS），所以这里做的是「把标题说人话」，并在提示词里
+        禁止模型补数字、人名、结论。每条都会带 💭 前缀，消息末尾有声明。
+
+        一次推送只调一次模型：10 条标题一起喂，2C2G 也扛得住。
+        任何环节失败都返回空列表，推送照发，不能因为模型挂了就没消息。
+        """
+        if not self._cfg_bool("ai_brief", True):
+            return []
+
+        titles = [cluster.title for cluster in clusters[:10]]
+        if not titles:
+            return []
+
+        try:
+            provider = self.context.get_using_provider()
+        except Exception as exc:
+            logger.warning(f"hotpulse 获取模型失败，本条推送不带解读：{exc}")
+            return []
+        if provider is None:
+            logger.info("hotpulse 未配置默认模型，本条推送不带解读")
+            return []
+
+        numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(titles, 1))
+        try:
+            response = await asyncio.wait_for(
+                provider.text_chat(prompt=numbered, system_prompt=_BRIEF_SYSTEM),
+                timeout=30,
+            )
+        except TypeError:
+            # 老版本的 text_chat 不接 system_prompt
+            try:
+                response = await asyncio.wait_for(provider.text_chat(numbered), timeout=30)
+            except Exception as exc:
+                logger.warning(f"hotpulse AI 解读失败：{exc}")
+                return []
+        except Exception as exc:
+            logger.warning(f"hotpulse AI 解读失败：{exc}")
+            return []
+
+        briefs = _parse_briefs(getattr(response, "completion_text", "") or "", len(titles))
+        got = sum(1 for b in briefs if b)
+        logger.info("hotpulse AI 解读 %d/%d 条", got, len(titles))
+        return briefs
 
     def _render_monitor_status(self) -> str:
         store = self._store
@@ -685,6 +771,15 @@ class HotPulsePlugin(Star):
         except Exception:
             return default
 
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        # WebUI 里勾的是 bool，但从 yaml / 环境导入时可能是字符串
+        value = self._cfg(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
     def _default_sources(self):
         raw = str(self._cfg("default_sources", "weibo,baidu,toutiao") or "")
         return resolve_many(_split_words(raw)) or list(ALL_SOURCES)[:3]
@@ -733,7 +828,7 @@ def _short(text, limit: int = 60) -> str | None:
     return clean if len(clean) <= limit else clean[:limit] + "…"
 
 
-def _render_new(clusters, preview: bool = False) -> str:
+def _render_new(clusters, preview: bool = False, briefs: list[str] | None = None) -> str:
     """监控推送的正文：同一件事跨平台合并成一条，最多 10 条。
 
     preview 是「刚加完关键词、还没有新上榜」时的一次性预览，用词要说清楚
@@ -741,6 +836,8 @@ def _render_new(clusters, preview: bool = False) -> str:
     """
     title = "📋 当前在榜" if preview else "🎯 新上榜"
     lines = [f"{title} · {datetime.now():%m-%d %H:%M}", ""]
+    briefs = briefs or []
+    used_brief = False
 
     for index, cluster in enumerate(clusters):
         if index >= 10:
@@ -753,10 +850,14 @@ def _render_new(clusters, preview: bool = False) -> str:
         meta = " · ".join(x for x in (" · ".join(cluster.sources), _hot_text(lead)) if x)
         if meta:
             lines.append(f"   {meta}")
-        # 平台自带摘要（目前只有 B站的视频简介有内容），有就放出来
+        # 平台自带摘要（目前只有 B站视频简介有真内容）优先，那是原文；
+        # 没有才用 AI 解读，两行不重复占位
         summary = _short(getattr(lead, "summary", None))
         if summary:
             lines.append(f"   {summary}")
+        elif index < len(briefs) and briefs[index]:
+            lines.append(f"   💭 {briefs[index]}")
+            used_brief = True
         # 链接一律给：热榜接口没有正文，用户只能点进去看，省掉这条消息就真的空了
         url = next(
             (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)), None
@@ -768,4 +869,7 @@ def _render_new(clusters, preview: bool = False) -> str:
     if preview:
         lines.append("以上是现在榜上已有的，之后只推新冒出来的。")
     lines.append("· /热点 搜 关键词 看全榜 · /热点监控列表 改关注词")
+    if used_brief:
+        # 必须写明白：这是模型看着标题说的话，不是新闻原文
+        lines.append("· 💭 = AI 根据标题推测，不是原文，细节点链接核对")
     return "\n".join(lines)
