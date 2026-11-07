@@ -1044,3 +1044,29 @@ def test_render_activity_when_all_empty():
     pages = {"阿里云": {"url": "https://a", "lines": []}}
     text = main._render_activity(pages, {})
     assert "都没抓到" in text
+
+
+def test_cloud_command_registers_session_for_later_push(tmp_path, monkeypatch):
+    """线上会踩的坑：定时推送发往 store.sessions，而这个列表以前只有 /热点监控 会写。
+    没加过关键词的人发 /云活动 只看到一次回复，第二天什么也收不到。"""
+    plugin = make_plugin(tmp_path, [], [])  # 一开始没有任何推送会话
+    assert plugin._store.sessions == []
+
+    async def fake_activities():
+        return {"阿里云": {"url": "https://a", "lines": ["低至 5 折"]}}
+
+    async def no_summary(pages):
+        return {}
+
+    monkeypatch.setattr(main, "cloud_activities", fake_activities)
+    monkeypatch.setattr(plugin, "_activity_summary", no_summary)
+
+    async def drive():
+        return [r async for r in plugin.cloud_activity(FakeEvent("云活动", "lark:new"))]
+
+    replies = run(drive())
+
+    assert replies and "云活动速览" in replies[0]
+    assert "lark:new" in plugin._store.sessions
+    saved = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
+    assert "lark:new" in saved["sessions"]  # 落盘了，重启还在

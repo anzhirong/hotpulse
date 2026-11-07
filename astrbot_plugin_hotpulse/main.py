@@ -245,7 +245,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.8.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.8.1")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -385,6 +385,7 @@ class HotPulsePlugin(Star):
     @filter.command("云价", alias={"云比价", "云服务器"})
     async def cloud_price(self, event: AstrMessageEvent):
         """查阿里云 / 腾讯云同规格服务器的官方价并对比。用法：/云价 [2核4G|4核8G]"""
+        self._remember_cloud_session(event)
         tokens = _split_words(self._strip_prefix(event.message_str))
         spec = next((t for t in tokens if t in CLOUD_SPECS), DEFAULT_SPEC)
         results, skipped = await cloud_compare(spec)
@@ -393,9 +394,29 @@ class HotPulsePlugin(Star):
     @filter.command("云活动", alias={"云优惠", "云促销"})
     async def cloud_activity(self, event: AstrMessageEvent):
         """看三家云厂商活动页现在在推什么。用法：/云活动"""
+        self._remember_cloud_session(event)
         pages = await cloud_activities()
         summary = await self._activity_summary(pages)
         yield event.plain_result(_render_activity(pages, summary))
+
+    def _remember_cloud_session(self, event: AstrMessageEvent) -> None:
+        """把当前会话登记成推送目标。
+
+        定时推送的发往 store.sessions，而这个列表以前只有 /热点监控 会写。
+        结果就是：没加过关键词的人发 /云活动 只看到一次回复，第二天什么也收不到。
+        用一次就订阅，这是用户对「自动发」的预期。
+        """
+        store = self._store
+        if store is None:
+            return
+        session = self._event_session(event)
+        if not session:
+            return
+        before = len(store.sessions)
+        store.remember_session(session)
+        if len(store.sessions) != before:
+            store.save()
+            logger.info("hotpulse 登记云推送会话 %s（共 %d 个）", session, len(store.sessions))
 
     # 自然语言入口：用户说「我想看 AI 相关热点」时，由模型自己决定调这个工具，
     # 不需要记 /热点 搜 这种指令。参数 schema 是从下面的 docstring 解析出来的，
