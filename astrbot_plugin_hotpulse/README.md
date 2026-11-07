@@ -2,25 +2,28 @@
 
 在飞书 / QQ / Telegram / Discord 里查各平台实时热榜，并订阅关键词——命中关注词的新标题会主动推送到群里。
 
-## 安装（两步）
+## 安装
 
-**1. 把整个 `astrbot_plugin_hotpulse` 目录放到 AstrBot 的插件目录**
+### 方式一：WebUI 上传（推荐，不用登录服务器）
 
-```bash
-cp -r astrbot_plugin_hotpulse /opt/AstrBot/data/plugins/
-```
+1. 浏览器打开 AstrBot 管理面板（默认 `http://服务器IP:6185`），登录
+2. 左侧「插件」→ 右下角 **＋** → **从文件安装**
+3. 把 `astrbot_plugin_hotpulse.zip` 拖进去 → 安装
+4. 装完在「已安装」里确认版本 `v1.3.1`，打开插件开关
 
-或者用打包好的 zip（注意先解压到临时目录再拷贝，避免多套一层目录）：
+日志里出现 `hotpulse 插件已加载` 即成功。同名插件会被直接覆盖，**不会**动你的订阅数据（存在 `data/plugin_data/` 下）。
+
+### 方式二：手工拷贝目录
 
 ```bash
 unzip -o astrbot_plugin_hotpulse.zip -d /tmp/hp
-cp -r /tmp/hp/astrbot_plugin_hotpulse /opt/AstrBot/data/plugins/
+cp -r /tmp/hp/astrbot_plugin_hotpulse/. /opt/AstrBot/data/plugins/astrbot_plugin_hotpulse/
 rm -rf /tmp/hp
 ```
 
-**2. 在 AstrBot WebUI 的「插件」页点刷新（重载插件）**
-
-插件卡片出现「热点雷达 v1.3.0」即成功。日志里会打印 `hotpulse 插件已加载`。
+> 注意是 `astrbot_plugin_hotpulse/.`（带 `/.`），这样才能合并覆盖、保留旧文件；
+> 不带 `/.` 会变成往里套一层 `astrbot_plugin_hotpulse/astrbot_plugin_hotpulse/`。
+> 拷完在 WebUI「插件」页点重载，或者 `docker restart astrbot`。
 
 > 依赖只有 `httpx`，AstrBot 自带，正常不需要额外安装。
 
@@ -125,7 +128,7 @@ rm -rf /tmp/hp
 4. **断档不补推**。快照超过 3 个扫描周期没更新（重启、断网、改配置），这一轮只重建快照不推送——否则隔了半天回来，整张榜都会被当成「新上榜」。
 5. **默认 23:00–07:00 不抓不推**，避免半夜吵人，早上也不会补推积压。你手动发 `/热点监控 关键词` 触发的即时扫描不受静默时段限制。
 
-后台每 30 分钟扫一轮（可在配置里调，最小 5 分钟），每轮最多推 10 条。订阅数据与榜单快照都存在插件目录下的 `data/subscriptions.json`，重启不丢。
+后台每 30 分钟扫一轮（可在配置里调，最小 5 分钟），每轮最多推 10 条。订阅数据与榜单快照存在 `data/plugin_data/astrbot_plugin_hotpulse/subscriptions.json`——放在插件目录外面，从 WebUI 重装/升级插件不会被清掉。
 
 ## 配置项
 
@@ -170,7 +173,6 @@ astrbot_plugin_hotpulse/
 ├── metadata.yaml        # 插件元数据
 ├── _conf_schema.json    # 配置项定义
 ├── requirements.txt     # 依赖（仅 httpx）
-├── data/                # 运行时生成：subscriptions.json
 └── core/                # 自包含抓取核心，不依赖 AstrBot
     ├── fetcher.py       # 并发、降级、缓存单飞、失败负缓存
     ├── match.py         # 关键词同义词组、标题 bigram 聚类（搜索与监控共用）
@@ -191,6 +193,7 @@ astrbot_plugin_hotpulse/
 
 ## 版本记录
 
+- **v1.3.1** 订阅数据改存 `data/plugin_data/<插件名>/`，从 WebUI 覆盖安装不再丢关键词与快照；老版本放在插件目录里的数据首次启动自动搬过去。
 - **v1.3.0** 只推「新上榜」：按源保存榜单快照、每轮做差集，已在榜的老条目不重复推；断档超过 3 个周期只重建快照；加词后先给一条「当前在榜」预览；推送按跨平台合并、带热度与链接。
 - **v1.2.0** `/热点 搜` 关键词筛选、同义词组、跨源 bigram 合并。
 - **v1.1.0** `/热点监控` 关键词订阅与主动推送。

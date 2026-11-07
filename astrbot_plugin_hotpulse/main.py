@@ -6,6 +6,7 @@
 
 import asyncio
 import importlib.util
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -104,7 +105,62 @@ def _hot_text(item) -> str | None:
     return f"{_fmt_hot(value)}{unit}"
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.0")
+# ---- 数据目录 ----
+# 关键词、去重记录、榜单快照都必须存在插件目录之外：从 WebUI「从文件安装」
+# 会整目录替换插件文件夹，放在里面等于每次升级都被清空。
+# AstrBot 的约定位置是 data/plugin_data/<插件名>/，不同版本取的 API 不一样，
+# 逐个尝试，全都不行才退回插件目录（老版本没有这些 API 时的保底）。
+_PLUGIN_NAME = "astrbot_plugin_hotpulse"
+
+
+def _data_dir_from_api() -> Path:
+    from astrbot.api.star import StarTools
+
+    return Path(StarTools.get_data_dir(_PLUGIN_NAME))
+
+
+def _data_dir_from_core() -> Path:
+    from astrbot.core.star.star_tools import StarTools
+
+    return Path(StarTools.get_data_dir(_PLUGIN_NAME))
+
+
+def _data_dir_from_path() -> Path:
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+    return Path(get_astrbot_data_path()) / "plugin_data" / _PLUGIN_NAME
+
+
+def _resolve_data_dir() -> Path:
+    for getter in (_data_dir_from_api, _data_dir_from_core, _data_dir_from_path):
+        try:
+            path = getter()
+        except Exception:  # 老版本没这个 API，或者签名不一样
+            continue
+        if path:
+            return path
+    return Path(__file__).resolve().parent / "data"
+
+
+def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
+    """v1.2.0 及以前把订阅文件放在插件目录里，第一次用新目录时搬过去。
+
+    返回是否真的搬了，方便日志和测试判断。
+    """
+    old = old or Path(__file__).resolve().parent / "data" / "subscriptions.json"
+    if target.exists() or not old.exists() or old.resolve() == target.resolve():
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old, target)
+    except OSError as exc:
+        logger.warning(f"hotpulse 迁移订阅数据失败，改用插件目录：{exc}")
+        return False
+    logger.info("hotpulse 已把订阅数据迁移到 %s", target.parent)
+    return True
+
+
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.1")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -130,7 +186,8 @@ class HotPulsePlugin(Star):
             zhihu_cookie=str(self._cfg("zhihu_cookie", "") or ""),
         )
 
-        store_path = Path(__file__).resolve().parent / "data" / "subscriptions.json"
+        store_path = _resolve_data_dir() / "subscriptions.json"
+        _migrate_old_store(store_path)
         self._store = SubscriptionStore.load(store_path)
 
         # 配置里填了初始关键词、而本地还没有订阅时，导入一次（之后以命令为准）

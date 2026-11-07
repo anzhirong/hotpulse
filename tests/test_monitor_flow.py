@@ -302,3 +302,54 @@ def test_render_merges_same_event_across_sources(tmp_path):
     text = plugin.context.sent[0][1]
     assert "微博 · 百度热搜" in text  # 同一件事合并成一条
     assert text.count("某公司发布新一代AI大模型") == 1
+
+
+# ---------- 数据目录 ----------
+
+
+def test_data_dir_falls_back_to_plugin_dir_without_astrbot_api():
+    # 测试里的假 astrbot 没有 StarTools，此时应退回插件目录而不是抛异常
+    path = main._resolve_data_dir()
+    assert path == PLUGIN_DIR / "data"
+
+
+def test_data_dir_prefers_astrbot_plugin_data(tmp_path, monkeypatch):
+    # AstrBot 提供 StarTools 时应落到 data/plugin_data/<插件名>，插件目录之外
+    class FakeStarTools:
+        @staticmethod
+        def get_data_dir(name: str):
+            assert name == "astrbot_plugin_hotpulse"
+            return tmp_path / "plugin_data" / name
+
+    monkeypatch.setattr(sys.modules["astrbot.api.star"], "StarTools", FakeStarTools, raising=False)
+    assert main._resolve_data_dir() == tmp_path / "plugin_data" / "astrbot_plugin_hotpulse"
+
+    # 签名不对（老版本不接受参数）时不能炸，要继续往下找
+    class BadStarTools:
+        @staticmethod
+        def get_data_dir():
+            return tmp_path / "wrong"
+
+    monkeypatch.setattr(sys.modules["astrbot.api.star"], "StarTools", BadStarTools, raising=False)
+    assert main._resolve_data_dir() == PLUGIN_DIR / "data"
+
+
+def test_migrate_old_store_keeps_existing_target(tmp_path):
+    old = tmp_path / "old.json"
+    old.write_text('{"keywords": ["旧"]}', encoding="utf-8")
+    target = tmp_path / "new" / "subscriptions.json"
+    target.parent.mkdir()
+    target.write_text('{"keywords": ["新"]}', encoding="utf-8")
+
+    assert main._migrate_old_store(target, old) is False
+    assert "新" in target.read_text(encoding="utf-8")  # 不覆盖新数据
+
+
+def test_migrate_old_store_copies_when_target_missing(tmp_path):
+    old = tmp_path / "old.json"
+    old.write_text('{"keywords": ["AI"]}', encoding="utf-8")
+    target = tmp_path / "plugin_data" / "subscriptions.json"
+
+    assert main._migrate_old_store(target, old) is True
+    assert "AI" in target.read_text(encoding="utf-8")
+    assert old.exists()  # 老文件留着，万一新目录后面出问题还能找回来
