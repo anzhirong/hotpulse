@@ -12,15 +12,19 @@
 ```
 hotpulse/
 ├── astrbot_plugin_hotpulse/     # 插件本体（这就是全部代码）
-│   ├── main.py                  # 指令注册、消息渲染
+│   ├── main.py                  # 指令注册、消息渲染、监控调度
 │   ├── metadata.yaml            # 插件元数据（名称/版本/兼容平台）
 │   ├── _conf_schema.json        # WebUI 可调配置项
 │   ├── requirements.txt         # 仅 httpx（AstrBot 自带）
 │   └── core/                    # 抓取内核：与 AstrBot 解耦
 │       ├── fetcher.py           # 并发调度、缓存、单飞、降级
+│       ├── match.py             # 同义词组、bigram 跨源合并
+│       ├── monitor.py           # 订阅存储、榜单快照比对、去重
 │       ├── models.py            # HotItem / SourceResult
 │       ├── settings.py          # 配置
 │       └── sources/             # 每平台一个适配器
+├── tests/                       # 回归测试（用假模块顶替 astrbot，不进插件包）
+├── scripts/package.py           # 打包脚本（排除 pycache/data，写 posix 路径）
 └── dist/                        # 打包产物（不入 git）
 ```
 
@@ -47,6 +51,7 @@ rm -rf /tmp/hp astrbot_plugin_hotpulse.zip
 | `/热点 微博 10` | 指定条数（1–20） |
 | `/热点 微博、百度` | 多平台，顿号或逗号均可 |
 | `/热点 搜 AI` | 全平台按关键词筛选，同一事件跨平台合并 |
+| `/热点监控 AI` | 订阅关键词，**新上榜**才推，加完先给一条「当前在榜」 |
 | `/热点源` | 列出可用平台及别名 |
 
 平台别名：`微博/wb`、`百度/bd`、`头条/tt`、`B站/哔哩哔哩/小破站/bili`、`36氪/36kr`、`知乎/zhihu`。
@@ -74,7 +79,7 @@ rm -rf /tmp/hp astrbot_plugin_hotpulse.zip
 - [x] 插件日志改用 AstrBot logger，报错能在 WebUI 日志页看到
 - [x] 失败结果加负缓存（30 秒），避免连续打上游
 - [x] `/热点 搜 <关键词>`：全平台筛选 + 同义词组 + 跨源 bigram 合并
-- [ ] 新上榜提醒：对比上一轮快照，只推「刚冲进榜」的条目
+- [x] 新上榜提醒：对比上一轮快照，只推「刚冲进榜」的条目
 
 ## 开发
 
@@ -83,6 +88,9 @@ rm -rf /tmp/hp astrbot_plugin_hotpulse.zip
 .venv/Scripts/python -m ruff check .
 .venv/Scripts/python -m ruff format --check .
 
-# 打包（务必用这个方式，PowerShell 的 Compress-Archive 会写出反斜杠路径，在 Linux 上解压会散成一堆文件）
-.venv/Scripts/python -m zipfile -c dist/astrbot_plugin_hotpulse.zip astrbot_plugin_hotpulse
+# 回归测试（11 条，覆盖冷启动/新上榜/断档/断源/静默/多会话）
+.venv/Scripts/python -m pytest -q
+
+# 打包：排除 __pycache__ 与本地 data/，并强制写 posix 路径
+.venv/Scripts/python scripts/package.py
 ```

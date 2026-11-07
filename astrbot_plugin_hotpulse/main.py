@@ -79,6 +79,17 @@ _HELP = (
 _NOISE_SUMMARY = {"新事件上榜", "热门", "热榜", "置顶", "刚刚", "热点"}
 
 
+def _fmt_hot(value) -> str:
+    """热度数值统一成「万/亿」，没有数值就返回空串。"""
+    if not isinstance(value, (int, float)) or value <= 0:
+        return ""
+    if value >= 1e8:
+        return f"{value / 1e8:.1f}亿"
+    if value >= 1e4:
+        return f"{value / 1e4:.1f}万"
+    return f"{int(value)}"
+
+
 def _hot_text(item) -> str | None:
     """把热度统一成「万/亿」，保留原来的单位后缀（播放等）。"""
     value = getattr(item, "hot", None)
@@ -90,14 +101,10 @@ def _hot_text(item) -> str | None:
         if raw and candidate in raw:
             unit = candidate
             break
-    if value >= 1e8:
-        return f"{value / 1e8:.1f}亿{unit}"
-    if value >= 1e4:
-        return f"{value / 1e4:.1f}万{unit}"
-    return f"{int(value)}{unit}"
+    return f"{_fmt_hot(value)}{unit}"
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.2.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -356,7 +363,9 @@ class HotPulsePlugin(Star):
         # 加完立刻扫一轮，不用等下一个周期；保存引用避免任务被 GC 提前回收
         if self._kick_task is not None and not self._kick_task.done():
             self._kick_task.cancel()
-        self._kick_task = asyncio.create_task(self._monitor_once())
+        self._kick_task = asyncio.create_task(
+            self._monitor_once(announce_session=self._event_session(event) or None)
+        )
 
     async def _monitor_loop(self):
         """后台循环。首次等待 2 分钟，避免开机时和用户查询抢上游。"""
@@ -375,37 +384,71 @@ class HotPulsePlugin(Star):
             logger.info("hotpulse 监控循环已停止")
             raise
 
-    async def _monitor_once(self):
-        """扫一遍所有源，推本次新命中的标题。"""
+    async def _monitor_once(self, announce_session: str | None = None):
+        """扫一轮，只推「这一轮刚上榜」的命中标题。
+
+        announce_session 有值是「用户刚加完关键词」的场景：只推给他本人、
+        跳过静默时段，并且在没有新上榜时先把他当前能看到的命中列出来，
+        免得他以为插件没动静。
+        """
         store = self._store
         if store is None or store.paused:
             return
-        if not store.keywords or not store.sessions:
+        if not store.keywords:
             return
+
+        targets = [announce_session] if announce_session else list(store.sessions)
+        if not targets:
+            return
+        if not announce_session and self._in_quiet_hours():
+            return
+
+        # 断档多久就不再做「新上榜」判断：三个扫描周期，至少 3 小时
+        max_age = self._monitor_interval() * 3 + 300
+        results = await self.fetcher.fetch_many(list(ALL_SOURCES), 50)
+
+        fresh: list[tuple[str, object]] = []
+        current: list[tuple[str, object]] = []
+        cold: list[str] = []
+        for result in results:
+            if not result.ok or not result.items:
+                # 抓取失败的源保留旧快照：等它恢复时，还挂在榜上的不会被当成新的
+                continue
+            titles = [item.title for item in result.items if item.title]
+            new_titles = store.diff_titles(result.source, titles, max_age=max_age)
+            # 必须先比对、再落快照，顺序反了本轮就会被自己覆盖成「没有新上榜」
+            store.remember_snapshot(result.source, titles)
+
+            matched = [item for item in result.items if match_title(item.title, store.keywords)]
+            if new_titles is None:
+                cold.append(result.source_name)
+                current.extend((result.source_name, item) for item in matched)
+                continue
+            wanted = set(new_titles)
+            fresh.extend(
+                (result.source_name, item)
+                for item in matched
+                if item.title in wanted and not store.is_seen(item.title)
+            )
+
+        # 快照先落盘：即使这一轮没命中，重启后也能接着比对而不是重新冷启动
+        store.save()
+        if cold:
+            logger.info("hotpulse 建立榜单快照（%s），本轮不推送", "、".join(cold))
+
         if MessageChain is None:
             logger.warning("hotpulse: 当前 AstrBot 版本不支持主动发消息，监控不可用")
             return
-        if self._in_quiet_hours():
-            return
 
-        results = await self.fetcher.fetch_many(list(ALL_SOURCES), 50)
-
-        hits: list[tuple[str, object]] = []
-        for result in results:
-            if not result.ok:
-                continue
-            for item in result.items:
-                if store.is_seen(item.title):
-                    continue
-                if match_title(item.title, store.keywords):
-                    hits.append((result.source_name, item))
-
+        preview = announce_session is not None and not fresh
+        hits = current if preview else fresh
         if not hits:
             return
 
-        text = _render_hits(hits)
+        clusters = cluster_hits(hits)
+        text = _render_new(clusters, preview=preview)
         delivered = 0
-        for session in list(store.sessions):
+        for session in targets:
             try:
                 ok = await self.context.send_message(session, MessageChain().message(text))
                 delivered += 1 if ok else 0
@@ -415,7 +458,13 @@ class HotPulsePlugin(Star):
         # 无论是否送达都记为已见，避免推不出去时每轮重复尝试刷日志
         store.mark_seen([item.title for _, item in hits])
         store.save()
-        logger.info(f"hotpulse 命中 {len(hits)} 条，送达 {delivered} 个会话")
+        logger.info(
+            "hotpulse %s %d 条（%d 组），送达 %d 个会话",
+            "当前在榜" if preview else "新上榜",
+            len(hits),
+            len(clusters),
+            delivered,
+        )
 
     def _render_monitor_status(self) -> str:
         store = self._store
@@ -431,6 +480,13 @@ class HotPulsePlugin(Star):
 
         lines = ["🎯 关键词监控", ""]
         lines.append(f"状态：{state} · 每 {interval // 60} 分钟扫描一次")
+        # 有快照就说明扫过，把时间摆出来，用户不用翻日志也能确认在跑
+        latest = max((float(s.get("at") or 0) for s in store.snapshots.values()), default=0.0)
+        if latest:
+            scanned = datetime.fromtimestamp(latest)
+            lines.append(
+                f"上次扫描：{scanned:%m-%d %H:%M}（已记录 {len(store.snapshots)} 个平台的榜单）"
+            )
         quiet = self._quiet_range_text()
         if quiet:
             lines.append(f"静默时段：{quiet}")
@@ -447,6 +503,7 @@ class HotPulsePlugin(Star):
         lines.append("· /热点监控清空          清空全部")
         lines.append("· /热点监控关闭 / 开启   暂停或恢复")
         lines.append("")
+        lines.append("推送规则：只推本轮新上榜的；已经在榜上的不会重复提醒。")
         lines.append("提示：直接写 AI 会自动展开成一组同义词（大模型/GPT/DeepSeek…），")
         lines.append("也可以自己定义：/热点监控 AI=AI,大模型,GPT,智能体")
         return "\n".join(lines)
@@ -566,14 +623,35 @@ def _split_words(raw: str) -> list[str]:
     return words
 
 
-def _render_hits(hits: list[tuple[str, object]]) -> str:
-    """一次最多推 10 条，多了会刷屏，剩下的留给下一轮或用户自己查。"""
-    lines = [f"🎯 热点命中 · {datetime.now():%m-%d %H:%M}", ""]
-    for shown, (source_name, item) in enumerate(hits):
-        if shown >= 10:
-            lines.append(f"…另有 {len(hits) - shown} 条命中，发 /热点 查看")
+def _render_new(clusters, preview: bool = False) -> str:
+    """监控推送的正文：同一件事跨平台合并成一条，最多 10 条。
+
+    preview 是「刚加完关键词、还没有新上榜」时的一次性预览，用词要说清楚
+    这些是榜上已有的，否则用户会误以为是刚冒出来的新闻。
+    """
+    title = "📋 当前在榜" if preview else "🎯 新上榜"
+    lines = [f"{title} · {datetime.now():%m-%d %H:%M}", ""]
+
+    # 条数少的时候带上链接，用户能直接跳过去看；多了会把消息撑得太长
+    with_url = len(clusters) <= 5
+    for index, cluster in enumerate(clusters):
+        if index >= 10:
+            lines.append(f"…另有 {len(clusters) - index} 条")
             break
-        lines.append(f"【{source_name}】{getattr(item, 'title', '')}")
+        lines.append(f"{index + 1}. {cluster.title}")
+        meta = " · ".join(x for x in (" · ".join(cluster.sources), _fmt_hot(cluster.hot)) if x)
+        if meta:
+            lines.append(f"   {meta}")
+        if with_url:
+            url = next(
+                (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)),
+                None,
+            )
+            if url:
+                lines.append(f"   {url}")
+
     lines.append("")
-    lines.append("调整：/热点监控列表")
+    if preview:
+        lines.append("以上是现在榜上已有的，之后只推新冒出来的。")
+    lines.append("· /热点 搜 关键词 看全榜 · /热点监控列表 改关注词")
     return "\n".join(lines)

@@ -19,6 +19,13 @@ from .match import match_title  # noqa: F401
 SEEN_LIMIT = 3000
 SEEN_TTL = 7 * 86400
 
+# 榜单快照：每轮抓到的标题记下来，下一轮拿来比对才知道「谁是新上榜的」。
+# 断档超过这个时长就不再比对，只重建快照——因为隔了半天之后整张榜早就
+# 换过一遍，硬比的结果是把整页都当成新闻推出去。
+SNAPSHOT_MAX_AGE = 3 * 3600
+# 单个源最多记多少条标题，防止某个源返回几百条把 json 撑大
+SNAPSHOT_TITLES = 60
+
 
 @dataclass
 class SubscriptionStore:
@@ -29,6 +36,8 @@ class SubscriptionStore:
     sessions: list[str] = field(default_factory=list)
     seen: dict[str, float] = field(default_factory=dict)
     paused: bool = False
+    # {源 key: {"at": 时间戳, "titles": [上一轮榜单标题]}}
+    snapshots: dict[str, dict] = field(default_factory=dict)
 
     # ---------- 读写 ----------
 
@@ -50,6 +59,18 @@ class SubscriptionStore:
             store.seen = {
                 str(k): float(v) for k, v in raw_seen.items() if isinstance(v, (int, float))
             }
+        raw_snap = data.get("snapshots") or {}
+        if isinstance(raw_snap, dict):
+            for key, value in raw_snap.items():
+                if not isinstance(value, dict):
+                    continue
+                titles = [str(t) for t in value.get("titles") or [] if str(t).strip()]
+                try:
+                    at = float(value.get("at") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if titles:
+                    store.snapshots[str(key)] = {"at": at, "titles": titles}
         return store
 
     def save(self) -> None:
@@ -60,6 +81,7 @@ class SubscriptionStore:
             "sessions": self.sessions,
             "seen": self.seen,
             "paused": self.paused,
+            "snapshots": self.snapshots,
         }
         tmp = self.path.with_suffix(".tmp")
         try:
@@ -112,9 +134,36 @@ class SubscriptionStore:
         for title in titles:
             self.seen[title] = now
 
+    # ---------- 榜单快照 ----------
+
+    def diff_titles(
+        self, source_key: str, titles: list[str], max_age: float = SNAPSHOT_MAX_AGE
+    ) -> list[str] | None:
+        """和上一轮同源榜单比，返回本轮新出现的标题。
+
+        返回 None 表示没有可比的上一轮（首次运行 / 断档太久 / 该源刚修好），
+        调用方此时只该记录快照、不要推送——否则第一次用就把整张榜当新闻推一遍。
+        """
+        snapshot = self.snapshots.get(source_key)
+        if not snapshot:
+            return None
+        if max_age > 0 and time.time() - float(snapshot.get("at") or 0) > max_age:
+            return None
+        previous = set(snapshot.get("titles") or [])
+        return [t for t in titles if t and t not in previous]
+
+    def remember_snapshot(self, source_key: str, titles: list[str]) -> None:
+        self.snapshots[source_key] = {
+            "at": time.time(),
+            "titles": [t for t in titles if t][:SNAPSHOT_TITLES],
+        }
+
     def prune(self) -> None:
         cutoff = time.time() - SEEN_TTL
         self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
         if len(self.seen) > SEEN_LIMIT:
             ordered = sorted(self.seen.items(), key=lambda kv: kv[1])[-SEEN_LIMIT:]
             self.seen = dict(ordered)
+        self.snapshots = {
+            k: v for k, v in self.snapshots.items() if float(v.get("at") or 0) >= cutoff
+        }
