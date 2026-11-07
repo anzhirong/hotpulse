@@ -226,7 +226,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.1")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.2")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -364,12 +364,14 @@ class HotPulsePlugin(Star):
 
         @filter.llm_tool(name="hot_search")
         async def hot_search_tool(self, event: AstrMessageEvent, keyword: str) -> str:
-            """查全网热榜上有没有某个主题，返回当前在榜的实时条目。
+            """查全网热榜（微博、百度、头条、B站、36氪）的实时条目，按主题筛选。
 
-            用户表达「我想看 / 有没有 / 最近有什么关于 X 的热点」时调用。
+            只要用户表达了想看某类内容，就直接调用本工具，不要反问他具体想看什么：
+            「我想看AI」「有没有芯片的消息」「最近有什么新能源的」「ai」都算。
+            用户说得宽泛时按字面调用即可，结果为空也没关系，工具会告诉你搜过哪些同义词。
 
             Args:
-                keyword(string): 想看的主题或关键词，例如 AI、芯片、新能源汽车
+                keyword(string): 主题关键词，如 AI、芯片、汽车；用户没说清就用原话里最接近的词
             """
             keywords = _split_words(keyword) or [keyword]
             try:
@@ -415,6 +417,22 @@ class HotPulsePlugin(Star):
                 "不要猜内容——系统拿不到正文。"
             )
             return "\n".join(lines)
+
+    # 光靠工具描述不够：弱一点的模型会把「我想看ai」当闲聊反问「想看哪块」。
+    # 这里在每次请求的 system prompt 末尾加一句硬提示，比改描述管用。
+    if hasattr(filter, "on_llm_request"):
+
+        @filter.on_llm_request()
+        async def hint_hot_search_tool(self, event: AstrMessageEvent, req):
+            hint = (
+                "\n（系统：你有 hot_search 工具，可查微博/百度/头条/B站/36氪的实时热榜。"
+                "用户说「我想看X」「有没有X的消息」「X 有什么热点」时必须直接调用它，"
+                "不要反问他想看什么，也不要凭记忆编新闻。）"
+            )
+            try:
+                req.system_prompt = (req.system_prompt or "") + hint
+            except Exception as exc:  # 框架结构变了也不能把请求搞挂
+                logger.debug(f"hotpulse 注入工具提示失败：{exc}")
 
     # ---------- 关键词筛选 ----------
 

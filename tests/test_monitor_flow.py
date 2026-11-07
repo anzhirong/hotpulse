@@ -42,6 +42,7 @@ def _stub_astrbot() -> None:
         return
 
     logger = types.SimpleNamespace(
+        debug=lambda *a, **k: None,
         info=lambda *a, **k: None,
         warning=lambda *a, **k: None,
         error=lambda *a, **k: None,
@@ -58,6 +59,7 @@ def _stub_astrbot() -> None:
     event.filter = types.SimpleNamespace(
         command=lambda *a, **k: lambda fn: fn,
         llm_tool=lambda *a, **k: lambda fn: fn,
+        on_llm_request=lambda *a, **k: lambda fn: fn,
     )
     star = types.ModuleType("astrbot.api.star")
 
@@ -727,3 +729,27 @@ def test_empty_result_shows_synonym_expansion(tmp_path):
     assert "没有" in out
     assert "同义词组" in out
     assert "半导体" in out
+
+
+def test_llm_request_hint_mentions_tool():
+    """弱模型会把「我想看ai」当闲聊反问，所以请求里要明确告诉它有工具可用。"""
+    plugin = make_plugin(Path(".") / "unused", [], [])
+
+    class Req:
+        system_prompt = "你是助手。"
+
+    req = Req()
+    run(plugin.hint_hot_search_tool(FakeEvent("我想看ai"), req))
+    assert "hot_search" in req.system_prompt
+    assert "不要反问" in req.system_prompt
+    assert req.system_prompt.startswith("你是助手。")  # 原有提示词不能被覆盖
+
+
+def test_llm_request_hint_survives_broken_req():
+    """框架结构变了（属性名不同）也不能把整次请求搞挂。"""
+    plugin = make_plugin(Path(".") / "unused", [], [])
+
+    class Weird:
+        pass
+
+    run(plugin.hint_hot_search_tool(FakeEvent("x"), Weird()))  # 不抛异常即可
