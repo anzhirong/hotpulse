@@ -115,12 +115,9 @@ _NOISE_SUMMARY = {"新事件上榜", "热门", "热榜", "置顶", "刚刚", "�
 # AI 解读：只根据标题转述，不允许补事实。热榜接口没有正文，能拿到的只有标题，
 # 所以这里定位是「把标题说人话」，不是「总结新闻」。每条会带 💭 前缀并在末尾声明。
 _BRIEF_SYSTEM = (
-    "你是新闻编辑助手。用户给你若干条热点标题，你给每条补一句中文说明，"
-    "讲清「这是什么 / 大概为什么上榜」。\n"
-    "硬性要求：只能依据标题里已经出现的信息，绝对不要编造数字、人名、时间、结论；"
-    "标题信息不足以判断时，就做字面转述，不要猜。\n"
-    "每条不超过 40 字，口语化。严格按原编号一行一条输出，格式为「1. 说明」，"
-    "不要加标题、不要解释你在做什么。"
+    "给每条热点标题补一句中文说明：这条在说什么。"
+    "只看标题，不要编数字、人名、时间、结论。"
+    "每条 30 字以内，按原编号一行一条，格式「1. 说明」。"
 )
 
 # 「1. 说明」「1、说明」「1)说明」都收
@@ -145,7 +142,7 @@ def _parse_briefs(text: str, count: int) -> list[str]:
         if len(body) < 6:
             # 太短的没信息量（「同上」「略」这种），宁可空着
             continue
-        briefs[index] = body if len(body) <= 60 else body[:60] + "…"
+        briefs[index] = body if len(body) <= 30 else body[:30] + "…"
     return briefs
 
 
@@ -229,7 +226,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.4.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -360,6 +357,50 @@ class HotPulsePlugin(Star):
         async for reply in self._monitor_command(event, self._strip_prefix(event.message_str)):
             yield reply
 
+    # 自然语言入口：用户说「我想看 AI 相关热点」时，由模型自己决定调这个工具，
+    # 不需要记 /热点 搜 这种指令。参数 schema 是从下面的 docstring 解析出来的，
+    # Args: 段格式写错会静默丢掉参数，所以 tests 里专门盯了这段。
+    if hasattr(filter, "llm_tool"):  # 老版本没有这个装饰器，有就注册，没有就只保留指令
+
+        @filter.llm_tool(name="hot_search")
+        async def hot_search_tool(self, event: AstrMessageEvent, keyword: str) -> str:
+            """查全网热榜上有没有某个主题，返回当前在榜的实时条目。
+
+            用户表达「我想看 / 有没有 / 最近有什么关于 X 的热点」时调用。
+
+            Args:
+                keyword(string): 想看的主题或关键词，例如 AI、芯片、新能源汽车
+            """
+            keywords = _split_words(keyword) or [keyword]
+            try:
+                results = await self.fetcher.fetch_many(list(ALL_SOURCES), 50)
+            except Exception as exc:
+                logger.error(f"hotpulse 工具抓取异常：{exc}")
+                return "抓取失败，稍后再试。"
+
+            pairs = [
+                (result.source_name, item)
+                for result in results
+                if result.ok
+                for item in result.items
+                if match_title(item.title, keywords)
+            ]
+            if not pairs:
+                failed = [r.source_name for r in results if not r.ok]
+                hint = f"（不可用：{'、'.join(failed)}）" if failed else ""
+                return (
+                    f"当前全网热榜里没有和「{keyword}」相关的条目"
+                    f"{_variants_hint(keywords)}{hint}。换个说法再试。"
+                )
+
+            clusters = cluster_hits(pairs)[:8]
+            lines = [f"「{keyword}」当前在榜 {len(clusters)} 组："]
+            for index, cluster in enumerate(clusters, 1):
+                sources = "、".join(cluster.sources)
+                lines.append(f"{index}. {cluster.title}（{sources}）")
+            lines.append("以上为系统实时抓取结果，请原样转述给用户，不要改写或补充事实。")
+            return "\n".join(lines)
+
     # ---------- 关键词筛选 ----------
 
     async def _search(self, event: AstrMessageEvent, keywords: list[str]):
@@ -383,7 +424,7 @@ class HotPulsePlugin(Star):
             failed = [r.source_name for r in results if not r.ok]
             hint = f"\n（本次不可用：{'、'.join(failed)}）" if failed else ""
             yield event.plain_result(
-                f"🔍 搜「{'、'.join(keywords)}」没有结果。\n"
+                f"🔍 搜「{'、'.join(keywords)}」没有结果。{_variants_hint(keywords)}\n"
                 f"榜单只覆盖当前热榜，冷门词可能确实不在榜上。{hint}"
             )
             return
@@ -826,6 +867,18 @@ def _short(text, limit: int = 60) -> str | None:
     if len(clean) < 8 or clean in _NOISE_SUMMARY:
         return None
     return clean if len(clean) <= limit else clean[:limit] + "…"
+
+
+def _variants_hint(keywords: list[str]) -> str:
+    """没有结果时把实际搜过的同义词列出来，否则用户以为插件没认真找。"""
+    words: list[str] = []
+    for keyword in keywords:
+        for word in variants(keyword):
+            if word and word not in words:
+                words.append(word)
+    if len(words) <= len(keywords):
+        return ""
+    return "（已按同义词组展开：" + "、".join(words[:8]) + "）"
 
 
 def _render_new(clusters, preview: bool = False, briefs: list[str] | None = None) -> str:

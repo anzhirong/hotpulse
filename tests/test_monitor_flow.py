@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import sys
 import time
@@ -54,7 +55,10 @@ def _stub_astrbot() -> None:
         pass
 
     event.AstrMessageEvent = AstrMessageEvent
-    event.filter = types.SimpleNamespace(command=lambda *a, **k: lambda fn: fn)
+    event.filter = types.SimpleNamespace(
+        command=lambda *a, **k: lambda fn: fn,
+        llm_tool=lambda *a, **k: lambda fn: fn,
+    )
     star = types.ModuleType("astrbot.api.star")
 
     class Context:  # pragma: no cover - 占位
@@ -615,7 +619,7 @@ def test_parse_briefs_aligns_by_number():
 
 def test_parse_briefs_truncates_long_line():
     briefs = main._parse_briefs("1. " + "很" * 200, 1)
-    assert len(briefs[0]) == 61  # 60 字 + 省略号
+    assert len(briefs[0]) == 31  # 30 字 + 省略号
     assert briefs[0].endswith("…")
 
 
@@ -673,3 +677,51 @@ def test_platform_summary_wins_over_ai_brief():
     text = main._render_new(clusters, briefs=["模型对这条的推测"])
     assert "这是视频作者自己写的简介" in text
     assert "💭" not in text
+
+
+# ---------- 自然语言工具 ----------
+
+
+def test_llm_tool_docstring_is_parsable():
+    """AstrBot 从 docstring 的 Args: 段生成参数 schema，格式错了参数会被静默丢弃。"""
+    doc = inspect.getdoc(main.HotPulsePlugin.hot_search_tool) or ""
+    assert "Args:" in doc
+    assert "keyword(string):" in doc
+
+
+def test_llm_tool_returns_filtered_titles(tmp_path):
+    plugin = make_plugin(tmp_path, [], [])
+    plugin.fetcher = FakeFetcher(
+        {
+            "weibo": ("微博", ["AI 视频引流", "某地发布暴雨预警"]),
+            "baidu": ("百度热搜", ["AI 手机发布"]),
+        }
+    )
+
+    out = run(plugin.hot_search_tool(FakeEvent("我想看 AI"), "AI"))
+
+    assert "AI 视频引流" in out
+    assert "AI 手机发布" in out
+    assert "某地发布暴雨预警" not in out
+    assert "不要改写" in out  # 提示模型原样转述，别自己发挥
+
+
+def test_llm_tool_reports_empty_result(tmp_path):
+    plugin = make_plugin(tmp_path, [], [])
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["某地发布暴雨预警"])})
+
+    out = run(plugin.hot_search_tool(FakeEvent("我想看火箭"), "火箭发射"))
+
+    assert "没有" in out
+
+
+def test_empty_result_shows_synonym_expansion(tmp_path):
+    """说「芯片」没结果时，要告诉用户实际搜的是哪一组词，否则像没干活。"""
+    plugin = make_plugin(tmp_path, [], [])
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["某地发布暴雨预警"])})
+
+    out = run(plugin.hot_search_tool(FakeEvent("我想看芯片"), "芯片"))
+
+    assert "没有" in out
+    assert "同义词组" in out
+    assert "半导体" in out
