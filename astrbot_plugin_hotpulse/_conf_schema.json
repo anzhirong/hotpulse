@@ -64,10 +64,16 @@
     "hint": "每天定时推一次三家云厂商的活动速览（不需要密钥）；如果填了下面的密钥，会再附一段同规格精确比价。",
     "default": true
   },
+  "cloud_interval": {
+    "type": "int",
+    "description": "云信息推送间隔（小时）",
+    "hint": "每隔多少小时扫一次并发给你，默认 12（半天）。装好后第一次就会推一条，之后按间隔走。设 0 则改用下面 cloud_time 的固定钟点",
+    "default": 12
+  },
   "cloud_time": {
     "type": "string",
-    "description": "比价推送时间",
-    "hint": "24 小时制 HH:MM，可多个如 09:10,21:10。留空则不推",
+    "description": "固定钟点模式（仅当间隔设为 0）",
+    "hint": "24 小时制 HH:MM，可多个如 09:10,21:10",
     "default": "09:10"
   },
   "cloud_spec": {

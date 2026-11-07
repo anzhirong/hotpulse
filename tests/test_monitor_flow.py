@@ -935,7 +935,10 @@ def test_render_cloud_when_nothing_works():
 
 def test_maybe_cloud_pushes_at_configured_time(tmp_path, monkeypatch):
     plugin = make_plugin(
-        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_time": "09:10"}
+        tmp_path,
+        [],
+        ["lark:a"],
+        config={"cloud_enabled": True, "cloud_interval": 0, "cloud_time": "09:10"},
     )
 
     async def fake_compare(spec):
@@ -960,7 +963,10 @@ def test_maybe_cloud_pushes_at_configured_time(tmp_path, monkeypatch):
 
 def test_maybe_cloud_respects_switch(tmp_path, monkeypatch):
     plugin = make_plugin(
-        tmp_path, [], ["lark:a"], config={"cloud_enabled": False, "cloud_time": "09:10"}
+        tmp_path,
+        [],
+        ["lark:a"],
+        config={"cloud_enabled": False, "cloud_interval": 0, "cloud_time": "09:10"},
     )
     called = []
 
@@ -1070,3 +1076,92 @@ def test_cloud_command_registers_session_for_later_push(tmp_path, monkeypatch):
     assert "lark:new" in plugin._store.sessions
     saved = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
     assert "lark:new" in saved["sessions"]  # 落盘了，重启还在
+
+
+# ---------- 间隔模式 ----------
+
+
+def _fake_activities(monkeypatch):
+    async def fake():
+        return {"阿里云": {"url": "https://a", "lines": ["低至 5 折"]}}
+
+    monkeypatch.setattr(main, "cloud_activities", fake)
+
+
+def test_cloud_interval_first_run_pushes_immediately(tmp_path, monkeypatch):
+    """装完就该推一条，让用户当场确认跑通了，而不是等 12 小时。"""
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_interval": 12}
+    )
+    _fake_activities(monkeypatch)
+
+    async def no_summary(pages):
+        return {}
+
+    monkeypatch.setattr(plugin, "_activity_summary", no_summary)
+    _freeze(monkeypatch, 9, 0)
+
+    run(plugin._maybe_cloud())
+
+    assert len(plugin.context.sent) == 1
+    assert "云活动速览" in plugin.context.sent[0][1]
+    assert "每 12 小时自动扫一次" in plugin.context.sent[0][1]
+    assert plugin._store.cloud_last > 0
+
+
+def test_cloud_interval_skips_before_due(tmp_path, monkeypatch):
+    from datetime import datetime as real_datetime
+
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_interval": 12}
+    )
+    _fake_activities(monkeypatch)
+
+    async def no_summary(pages):
+        return {}
+
+    monkeypatch.setattr(plugin, "_activity_summary", no_summary)
+    _freeze(monkeypatch, 9, 0)
+    plugin._store.cloud_last = real_datetime(2026, 11, 7, 8, 0).timestamp()  # 1 小时前
+
+    run(plugin._maybe_cloud())
+    assert plugin.context.sent == []
+
+
+def test_cloud_interval_due_after_interval(tmp_path, monkeypatch):
+    from datetime import datetime as real_datetime
+
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_interval": 12}
+    )
+    _fake_activities(monkeypatch)
+
+    async def no_summary(pages):
+        return {}
+
+    monkeypatch.setattr(plugin, "_activity_summary", no_summary)
+    _freeze(monkeypatch, 21, 0)
+    plugin._store.cloud_last = real_datetime(2026, 11, 7, 8, 0).timestamp()  # 13 小时前
+
+    run(plugin._maybe_cloud())
+    assert len(plugin.context.sent) == 1
+
+
+def test_cloud_last_survives_reload(tmp_path, monkeypatch):
+    """间隔靠 cloud_last 计时，重启后必须还在文件里，否则一重启就重复推。"""
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_interval": 12}
+    )
+    _fake_activities(monkeypatch)
+
+    async def no_summary(pages):
+        return {}
+
+    monkeypatch.setattr(plugin, "_activity_summary", no_summary)
+    _freeze(monkeypatch, 9, 0)
+    run(plugin._maybe_cloud())
+    stamp = plugin._store.cloud_last
+
+    again = SubscriptionStore.load(tmp_path / "subscriptions.json")
+    assert again.cloud_last == stamp
+    assert again.sessions == ["lark:a"]

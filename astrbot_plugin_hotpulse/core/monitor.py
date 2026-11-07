@@ -41,6 +41,9 @@ class SubscriptionStore:
     # 已经发过的定时总结，形如 "2026-11-07 09:00"。
     # 存下来是为了重启后不重复发同一次总结。
     digest_sent: list[str] = field(default_factory=list)
+    # 上次云信息推送的时间戳。间隔模式靠它算「够不够 12 小时了」，
+    # 存在文件里，重启不会把间隔清空导致刚重启就推一遍。
+    cloud_last: float = 0.0
 
     # ---------- 读写 ----------
 
@@ -75,6 +78,9 @@ class SubscriptionStore:
                 if titles:
                     store.snapshots[str(key)] = {"at": at, "titles": titles}
         store.digest_sent = [str(s) for s in data.get("digest_sent") or [] if str(s).strip()]
+        raw_last = data.get("cloud_last")
+        if isinstance(raw_last, (int, float)):
+            store.cloud_last = float(raw_last)
         return store
 
     def save(self) -> None:
@@ -87,6 +93,7 @@ class SubscriptionStore:
             "paused": self.paused,
             "snapshots": self.snapshots,
             "digest_sent": self.digest_sent,
+            "cloud_last": self.cloud_last,
         }
         tmp = self.path.with_suffix(".tmp")
         try:

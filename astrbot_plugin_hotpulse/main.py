@@ -245,7 +245,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.8.1")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.9.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -855,33 +855,49 @@ class HotPulsePlugin(Star):
         return _parse_activity_summary(text, list(pages))
 
     async def _maybe_cloud(self):
-        """到点推一次云活动速览（有密钥时附带同规格比价）。"""
+        """到点推一次云活动速览（有密钥时附带同规格比价）。
+
+        两种节奏二选一：
+        - 间隔模式（默认）：每 cloud_interval 小时一次，不看钟点。装好后第一次调用
+          就会推（cloud_last 为 0），这样配完立刻能确认跑通。
+        - 定点模式：cloud_interval 设 0，改用 cloud_time 里列的钟点。
+        """
         store = self._store
         if store is None or not store.sessions:
             return
         if not self._cfg_bool("cloud_enabled", False):
             return
 
-        times = self._times_of("cloud_time")
-        if not times:
-            return
         now = datetime.now()
-        slot = f"{now:%Y-%m-%d} {now:%H:%M}"
-        key = f"cloud {slot}"
-        if now.strftime("%H:%M") not in times or key in store.digest_sent:
-            return
+        interval_hours = self._as_int(self._cfg("cloud_interval", 12), 12)
+
+        if interval_hours > 0:
+            last = float(store.cloud_last or 0.0)
+            if last and now.timestamp() - last < interval_hours * 3600:
+                return
+            slot = f"cloud {now:%Y-%m-%d %H:%M}"
+        else:
+            times = self._times_of("cloud_time")
+            slot = f"cloud {now:%Y-%m-%d %H:%M}"
+            if not times or now.strftime("%H:%M") not in times:
+                return
+            if slot in store.digest_sent:
+                return
 
         spec = str(self._cfg("cloud_spec", DEFAULT_SPEC) or DEFAULT_SPEC)
         if spec not in CLOUD_SPECS:
             spec = DEFAULT_SPEC
 
-        store.digest_sent.append(key)
+        # 先落盘再抓：抓取要十几秒，这期间循环可能再进来一次，会重复推
+        store.digest_sent.append(slot)
+        store.cloud_last = now.timestamp()
         store.save()
 
         # 活动速览不需要密钥，先抓这个
         pages = await cloud_activities()
         summary = await self._activity_summary(pages)
-        parts = [_render_activity(pages, summary)]
+        cadence = f"每 {interval_hours} 小时" if interval_hours > 0 else ""
+        parts = [_render_activity(pages, summary, cadence)]
 
         # 填了密钥才做精确比价，两条消息合成一条，别一天刷两次
         results, skipped = await cloud_compare(spec)
@@ -1211,7 +1227,7 @@ def _parse_activity_summary(text: str, vendors: list[str]) -> dict[str, str]:
     return result
 
 
-def _render_activity(pages: dict[str, dict], summary: dict[str, str]) -> str:
+def _render_activity(pages: dict[str, dict], summary: dict[str, str], cadence: str = "") -> str:
     """活动速览。没拿到 AI 归纳时，退回原始片段，别让用户什么都看不到。"""
     lines = [f"📉 云活动速览 · {datetime.now():%m-%d %H:%M}", ""]
     got_any = False
@@ -1239,7 +1255,10 @@ def _render_activity(pages: dict[str, dict], summary: dict[str, str]) -> str:
         if page.get("url"):
             lines.append(f"{vendor} {page['url']}")
     lines.append("")
-    lines.append("· 同规格精确对比：/云价 2核4G")
+    tail = "· 同规格精确对比：/云价 2核4G"
+    if cadence:
+        tail = f"· {cadence}自动扫一次" + "，精确对比：/云价 2核4G"
+    lines.append(tail)
     return "\n".join(lines)
 
 
