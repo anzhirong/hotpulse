@@ -1,8 +1,8 @@
 name: astrbot_plugin_hotpulse
 display_name: 热点雷达
 short_desc: 查全网实时热榜，关注词上榜即推送
-desc: 在聊天里查微博、百度、头条、知乎、B站、36氪的实时热点，支持指定平台与条数；可订阅关键词，新上榜的命中标题会主动推送到会话。
-version: v1.1.0
+desc: 在聊天里查微博、百度、头条、知乎、B站、36氪的实时热点，支持指定平台与条数；可按关键词筛选并合并同一事件的跨平台报道；可订阅关键词，新上榜的命中标题会主动推送到会话。
+version: v1.2.0
 author: anzhirong
 repo: https://github.com/anzhirong/hotpulse
 support_platforms:

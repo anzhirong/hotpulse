@@ -49,6 +49,9 @@ _core = _load_core()
 HotPulseFetcher = _core.HotPulseFetcher
 SubscriptionStore = _core.SubscriptionStore
 match_title = _core.match_title
+cluster_hits = _core.cluster_hits
+split_def = _core.split_def
+variants = _core.variants
 configure = _core.configure
 set_logger = _core.set_logger
 ALL_SOURCES = _core.ALL_SOURCES
@@ -58,12 +61,16 @@ resolve_many = _core.resolve_many
 # 命令前缀。带斜杠的必须排在前面，否则 "/热点 微博" 会被 "热点" 提前截断
 _PREFIXES = ("/热点", "/热榜", "/hot", "热点", "热榜", "hot")
 
+# 这些词开头的查询走「关键词筛选」，而不是当作平台名
+_SEARCH_WORDS = {"搜", "搜索", "找", "查", "筛选"}
+
 _HELP = (
     "🔥 热点查询用法\n"
     "· /热点            默认几个平台各 5 条\n"
     "· /热点 微博       只看单个平台\n"
     "· /热点 微博 10    指定条数（1-20）\n"
     "· /热点 微博 百度  一次查多个平台\n"
+    "· /热点 搜 AI      从全平台里筛出含关键词的\n"
     "· /热点源          查看所有可用平台\n"
     "· /热点监控 AI     订阅关键词，上榜即推送"
 )
@@ -90,7 +97,7 @@ def _hot_text(item) -> str | None:
     return f"{int(value)}{unit}"
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.1.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.2.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -162,6 +169,21 @@ class HotPulsePlugin(Star):
             return
 
         tokens = _split_words(raw)
+
+        # 「搜」走关键词筛选：全平台抓一遍，只在本地过滤，不额外请求上游
+        if tokens and tokens[0] in _SEARCH_WORDS:
+            keywords = tokens[1:]
+            if not keywords:
+                yield event.plain_result(
+                    "用法：/热点 搜 关键词\n"
+                    "例：/热点 搜 AI\n"
+                    "    /热点 搜 AI=AI,大模型,GPT,DeepSeek（自己定义同义词组）"
+                )
+                return
+            async for reply in self._search(event, keywords):
+                yield reply
+            return
+
         limit = self._default_limit()
         source_tokens: list[str] = []
         for token in tokens:
@@ -198,6 +220,63 @@ class HotPulsePlugin(Star):
         lines.append("")
         lines.append("例：/热点 微博 8")
         yield event.plain_result("\n".join(lines))
+
+    # ---------- 关键词筛选 ----------
+
+    async def _search(self, event: AstrMessageEvent, keywords: list[str]):
+        """抓全平台后在本地过滤、合并同一事件，按跨平台数排序。"""
+        try:
+            results = await self.fetcher.fetch_many(list(ALL_SOURCES), 50)
+        except Exception as exc:
+            logger.error(f"hotpulse 搜索抓取异常：{exc}")
+            yield event.plain_result("⚠️ 抓取出错了，稍后再试一次。")
+            return
+
+        pairs = []
+        for result in results:
+            if not result.ok:
+                continue
+            for item in result.items:
+                if match_title(item.title, keywords):
+                    pairs.append((result.source_name, item))
+
+        if not pairs:
+            failed = [r.source_name for r in results if not r.ok]
+            hint = f"\n（本次不可用：{'、'.join(failed)}）" if failed else ""
+            yield event.plain_result(
+                f"🔍 搜「{'、'.join(keywords)}」没有结果。\n"
+                f"榜单只覆盖当前热榜，冷门词可能确实不在榜上。{hint}"
+            )
+            return
+
+        clusters = cluster_hits(pairs)
+        yield event.plain_result(self._render_search(keywords, clusters, results))
+
+    @staticmethod
+    def _render_search(keywords: list[str], clusters, results) -> str:
+        multi = sum(1 for c in clusters if len(c.sources) > 1)
+        subtitle = f"{len(clusters)} 组结果"
+        if multi:
+            subtitle += f"，其中 {multi} 组多个平台同时上榜"
+        lines = [
+            f"🔍 搜「{'、'.join(keywords)}」· {datetime.now():%m-%d %H:%M}",
+            subtitle,
+            "",
+        ]
+        for index, cluster in enumerate(clusters):
+            if index >= 15:
+                lines.append(f"…另有 {len(clusters) - index} 组，缩小关键词可看更多")
+                break
+            lines.append(f"{index + 1}. {cluster.title}")
+            tags = " · ".join(cluster.sources)
+            lines.append(f"   [{tags}]")
+        failed = [r.source_name for r in results if not r.ok]
+        if failed:
+            lines.append("")
+            lines.append("⚠️ 本次不可用：" + "、".join(failed))
+        lines.append("")
+        lines.append("想持续盯这个词：/热点监控 " + "、".join(keywords))
+        return "\n".join(lines)
 
     # ---------- 关键词监控 ----------
 
@@ -368,8 +447,8 @@ class HotPulsePlugin(Star):
         lines.append("· /热点监控清空          清空全部")
         lines.append("· /热点监控关闭 / 开启   暂停或恢复")
         lines.append("")
-        lines.append("提示：只匹配标题里字面出现的词，建议把同义词一起加，")
-        lines.append("比如 AI、大模型、GPT、DeepSeek、智能体。")
+        lines.append("提示：直接写 AI 会自动展开成一组同义词（大模型/GPT/DeepSeek…），")
+        lines.append("也可以自己定义：/热点监控 AI=AI,大模型,GPT,智能体")
         return "\n".join(lines)
 
     def _in_quiet_hours(self) -> bool:

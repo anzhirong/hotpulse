@@ -5,8 +5,9 @@
 """
 
 from .fetcher import HotPulseFetcher
+from .match import Cluster, cluster_hits, match_title, split_def, variants
 from .models import HotItem, SourceResult
-from .monitor import SubscriptionStore, match_title
+from .monitor import SubscriptionStore
 from .settings import (
     Settings,
     configure,
@@ -18,11 +19,13 @@ from .sources import ALL_SOURCES, resolve, resolve_many
 
 __all__ = [
     "ALL_SOURCES",
+    "Cluster",
     "HotItem",
     "HotPulseFetcher",
     "Settings",
     "SourceResult",
     "SubscriptionStore",
+    "cluster_hits",
     "configure",
     "get_logger",
     "get_settings",
@@ -30,4 +33,6 @@ __all__ = [
     "resolve",
     "resolve_many",
     "set_logger",
+    "split_def",
+    "variants",
 ]

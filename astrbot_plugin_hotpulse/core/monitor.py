@@ -11,18 +11,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# 匹配规则放在 match.py，搜索和监控共用；这里只是转出，保持旧的导入路径可用
+from .match import match_title  # noqa: F401
+
 # 已推送标题的保留策略：最多 3000 条、最长 7 天，超出按时间淘汰，
 # 否则字典会随着热搜不断累积，几个月后 json 文件变成几 MB。
 SEEN_LIMIT = 3000
 SEEN_TTL = 7 * 86400
-
-
-def match_title(title: str, keywords: list[str]) -> list[str]:
-    """返回这条标题命中的关键词（大小写不敏感，字面包含）。"""
-    if not title or not keywords:
-        return []
-    low = title.lower()
-    return [kw for kw in keywords if kw and kw.lower() in low]
 
 
 @dataclass
