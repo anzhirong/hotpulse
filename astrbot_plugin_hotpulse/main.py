@@ -78,6 +78,21 @@ resolve_many = _core.resolve_many
 # 命令前缀。带斜杠的必须排在前面，否则 "/热点 微博" 会被 "热点" 提前截断
 _PREFIXES = ("/热点", "/热榜", "/hot", "热点", "热榜", "hot")
 
+# 「热点监控」必须单独注册成一条指令，不能只当 /热点 的子命令：
+# AstrBot 的 CommandFilter 判断的是 message_str.startswith("热点 ") 或完全相等，
+# 「/热点监控 ai」里「热点」后面紧跟的是「监」而不是空格，匹配不上，消息会掉进
+# 大模型（用户看到的就是「什么玩意」）。
+# 别名覆盖不带空格的几种写法，否则 /热点监控列表 这类也会漏。
+# 注意：别名去掉「热点」前缀后必须仍然以「监控」开头，否则下面的解析会错位。
+_MONITOR_ALIASES = {
+    "热榜监控",
+    "热点监控列表",
+    "热点监控删除",
+    "热点监控清空",
+    "热点监控关闭",
+    "热点监控开启",
+}
+
 # 这些词开头的查询走「关键词筛选」，而不是当作平台名
 _SEARCH_WORDS = {"搜", "搜索", "找", "查", "筛选"}
 
@@ -89,7 +104,8 @@ _HELP = (
     "· /热点 微博 百度  一次查多个平台\n"
     "· /热点 搜 AI      从全平台里筛出含关键词的\n"
     "· /热点源          查看所有可用平台\n"
-    "· /热点监控 AI     订阅关键词，上榜即推送"
+    "· /热点监控 AI     订阅关键词，新上榜才推送\n"
+    "· /热点监控列表    看监控状态"
 )
 
 # 这些不是摘要，只是平台的标记，显示出来反而误导
@@ -176,7 +192,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.3")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.4")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -242,7 +258,7 @@ class HotPulsePlugin(Star):
         """查询各平台实时热点。用法：/热点 [平台] [条数]"""
         raw = self._strip_prefix(event.message_str)
 
-        # 监控是 /热点 的子命令：这样不会和 /热点 抢前缀，也不会被提前截断
+        # 兼容「/热点 监控 AI」这种带空格的老写法（下面 monitor 那条是主入口）
         if raw.startswith("监控"):
             async for reply in self._monitor_command(event, raw):
                 yield reply
@@ -300,6 +316,12 @@ class HotPulsePlugin(Star):
         lines.append("")
         lines.append("例：/热点 微博 8")
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("热点监控", alias=_MONITOR_ALIASES)
+    async def monitor(self, event: AstrMessageEvent):
+        """订阅关键词，命中词新上榜就推送。用法：/热点监控 [关键词|列表|删除|清空|关闭|开启]"""
+        async for reply in self._monitor_command(event, self._strip_prefix(event.message_str)):
+            yield reply
 
     # ---------- 关键词筛选 ----------
 
@@ -367,7 +389,9 @@ class HotPulsePlugin(Star):
             yield event.plain_result("⚠️ 插件尚未初始化完成，稍后再试。")
             return
 
-        rest = raw[len("监控") :].strip()
+        # raw 可能是「监控 ai」（从 /热点监控 进来的），也可能是 /热点 那条
+        # 路由转过来的同样形式；统一把开头的「监控」摘掉，剩下的才是子命令/关键词
+        rest = raw[len("监控") :].strip() if raw.startswith("监控") else raw.strip()
 
         if rest.startswith("列表") or not rest:
             yield event.plain_result(self._render_monitor_status())

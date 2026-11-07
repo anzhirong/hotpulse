@@ -396,3 +396,105 @@ def test_half_built_core_is_removed_from_sys_modules(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main, "__file__", real_file)
         main._load_core()  # 恢复成真的 core，后面的用例还要用
+
+
+# ---------- 指令解析 ----------
+# 线上踩过的坑：/热点监控 ai 匹配不到 @filter.command("热点")，消息掉进大模型。
+# AstrBot 只认「命令名 + 空格」或「整句等于命令名」，所以这里逐个盯住能走通的写法。
+
+
+class FakeEvent:
+    def __init__(self, message_str: str, session: str = "lark:test") -> None:
+        self.message_str = message_str
+        self.unified_msg_origin = session
+
+    def plain_result(self, text: str) -> str:
+        return text
+
+
+def drive_monitor(plugin, monkeypatch, message_str: str) -> list[str]:
+    """照抄 monitor 处理器的那两行：剥前缀 -> 交给 _monitor_command。"""
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(plugin, "_monitor_once", _noop)  # 别真去抓上游
+
+    async def collect():
+        raw = plugin._strip_prefix(message_str)
+        return [reply async for reply in plugin._monitor_command(FakeEvent(message_str), raw)]
+
+    return run(collect())
+
+
+@pytest.mark.parametrize("message_str", ["/热点监控 AI", "热点监控 AI"])
+def test_monitor_add_keyword_forms(tmp_path, monkeypatch, message_str):
+    plugin = make_plugin(tmp_path, ["旧词"], ["lark:test"])
+    replies = drive_monitor(plugin, monkeypatch, message_str)
+    assert replies and "已开始监控" in replies[-1]
+    assert "AI" in plugin._store.keywords
+
+
+def test_all_documented_forms_pass_astrbot_command_matching():
+    """复刻 CommandFilter 的判定：整句相等，或者「命令名 + 空格」开头。
+
+    上面的用例测的是「进到处理器之后」的解析；这条测「能不能进到处理器」，
+    漏一个写法就是用户发出去没人理、被大模型接走。
+    """
+    monitor_names = {"热点监控"} | main._MONITOR_ALIASES
+    cases = [
+        "热点监控 AI",  # 加词
+        "热点监控列表",
+        "热点监控删除 AI",
+        "热点监控清空",
+        "热点监控关闭",
+        "热点监控开启",
+    ]
+    for msg in cases:
+        assert any(msg == n or msg.startswith(n + " ") for n in monitor_names), msg
+
+    # 查询类不能被监控别名抢走
+    for msg in ["热点", "热点 微博 10", "热点 搜 AI", "热点源"]:
+        assert not any(msg == n or msg.startswith(n + " ") for n in monitor_names), msg
+
+
+@pytest.mark.parametrize(
+    ("message_str", "expect"),
+    [
+        ("/热点监控列表", "关键词监控"),
+        ("热点监控列表", "关键词监控"),
+        ("/热点监控删除 旧词", "已删除"),
+        ("/热点监控清空", "已清空"),
+        ("/热点监控关闭", "已暂停"),
+        ("/热点监控开启", "已恢复"),
+    ],
+)
+def test_monitor_subcommand_forms(tmp_path, monkeypatch, message_str, expect):
+    plugin = make_plugin(tmp_path, ["旧词"], ["lark:test"])
+    replies = drive_monitor(plugin, monkeypatch, message_str)
+    assert replies and expect in replies[-1]
+
+
+def test_monitor_still_works_as_slash_hot_subcommand(tmp_path, monkeypatch):
+    # 老写法「/热点 监控 AI」保留可用
+    plugin = make_plugin(tmp_path, ["旧词"], ["lark:test"])
+    assert plugin._strip_prefix("/热点 监控 AI") == "监控 AI"
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(plugin, "_monitor_once", _noop)
+
+    async def collect():
+        return [r async for r in plugin._monitor_command(FakeEvent("x"), "监控 AI")]
+
+    assert "已开始监控" in run(collect())[-1]
+    assert "AI" in plugin._store.keywords
+
+
+def test_monitor_aliases_all_survive_prefix_strip():
+    """别名去掉「热点」前缀后必须仍以「监控」开头，否则 rest 会错位。"""
+    plugin = make_plugin(Path(".") / "unused", [], [])
+    for alias in main._MONITOR_ALIASES:
+        raw = plugin._strip_prefix("/" + alias)
+        assert raw.startswith("监控"), f"{alias} -> {raw}"
