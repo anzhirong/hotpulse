@@ -703,6 +703,8 @@ def test_llm_tool_returns_filtered_titles(tmp_path):
     assert "AI 视频引流" in out
     assert "AI 手机发布" in out
     assert "某地发布暴雨预警" not in out
+    assert "https://example.com/0" in out  # 链接必须给，热榜没有正文
+    assert "微博" in out  # 平台不能丢
     assert "不要改写" in out  # 提示模型原样转述，别自己发挥
 
 

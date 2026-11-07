@@ -226,7 +226,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.1")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -393,12 +393,27 @@ class HotPulsePlugin(Star):
                     f"{_variants_hint(keywords)}{hint}。换个说法再试。"
                 )
 
+            # 每条都带平台和链接：热榜没有正文，链接是用户唯一能看下去的入口。
+            # 之前只给「标题（平台）」，模型会顺手把括号删掉重排成纯列表，
+            # 用户回「1」想看某条时，回复里没有任何可点的东西。
             clusters = cluster_hits(pairs)[:8]
             lines = [f"「{keyword}」当前在榜 {len(clusters)} 组："]
             for index, cluster in enumerate(clusters, 1):
-                sources = "、".join(cluster.sources)
-                lines.append(f"{index}. {cluster.title}（{sources}）")
-            lines.append("以上为系统实时抓取结果，请原样转述给用户，不要改写或补充事实。")
+                lines.append(f"{index}. {cluster.title}")
+                meta = " · ".join(cluster.sources)
+                url = next(
+                    (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)),
+                    None,
+                )
+                lines.append(f"   {meta}")
+                if url:
+                    lines.append(f"   {url}")
+            lines.append(
+                "以上是系统实时抓取的原文，请原样发给用户：保留编号、平台和链接，"
+                "不要改写标题、不要删链接、不要补充标题里没有的信息。"
+                "用户之后说「第 N 条」「1」时，直接把对应那条的标题和链接给他，"
+                "不要猜内容——系统拿不到正文。"
+            )
             return "\n".join(lines)
 
     # ---------- 关键词筛选 ----------
