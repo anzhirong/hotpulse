@@ -192,7 +192,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.5")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.6")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -720,6 +720,19 @@ def _split_words(raw: str) -> list[str]:
     return words
 
 
+def _short(text, limit: int = 60) -> str | None:
+    """把平台摘要压成一行：去换行、去装饰符号、太长截断。
+
+    短于 8 字的不算摘要（头条的 LabelDesc 只有 5 个字，是标签不是内容）。
+    """
+    if not text:
+        return None
+    clean = " ".join(str(text).split()).strip("-—· ")
+    if len(clean) < 8 or clean in _NOISE_SUMMARY:
+        return None
+    return clean if len(clean) <= limit else clean[:limit] + "…"
+
+
 def _render_new(clusters, preview: bool = False) -> str:
     """监控推送的正文：同一件事跨平台合并成一条，最多 10 条。
 
@@ -729,8 +742,6 @@ def _render_new(clusters, preview: bool = False) -> str:
     title = "📋 当前在榜" if preview else "🎯 新上榜"
     lines = [f"{title} · {datetime.now():%m-%d %H:%M}", ""]
 
-    # 条数少的时候带上链接，用户能直接跳过去看；多了会把消息撑得太长
-    with_url = len(clusters) <= 5
     for index, cluster in enumerate(clusters):
         if index >= 10:
             lines.append(f"…另有 {len(clusters) - index} 条")
@@ -742,13 +753,16 @@ def _render_new(clusters, preview: bool = False) -> str:
         meta = " · ".join(x for x in (" · ".join(cluster.sources), _hot_text(lead)) if x)
         if meta:
             lines.append(f"   {meta}")
-        if with_url:
-            url = next(
-                (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)),
-                None,
-            )
-            if url:
-                lines.append(f"   {url}")
+        # 平台自带摘要（目前只有 B站的视频简介有内容），有就放出来
+        summary = _short(getattr(lead, "summary", None))
+        if summary:
+            lines.append(f"   {summary}")
+        # 链接一律给：热榜接口没有正文，用户只能点进去看，省掉这条消息就真的空了
+        url = next(
+            (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)), None
+        )
+        if url:
+            lines.append(f"   {url}")
 
     lines.append("")
     if preview:

@@ -526,3 +526,41 @@ def test_cluster_sort_cross_source_still_wins():
     )
     assert len(clusters[0].sources) == 2
     assert clusters[0].rank == 1
+
+
+# ---------- 推送正文 ----------
+
+
+def test_push_keeps_links_and_platform_summary():
+    """热榜接口没有正文，链接是唯一的入口；平台自带摘要（B站简介）要放出来，
+    太短的不算摘要（头条 LabelDesc 只有 5 个字，是标签）。"""
+    titles = [
+        "苹果发布新芯片",
+        "某地发布暴雨预警",
+        "国产电影票房破纪录",
+        "高校开学时间定了",
+        "新能源车补贴调整",
+        "演唱会门票秒空",
+        "城市地铁新线路开通",
+        "外卖平台配送费涨价",
+    ]
+    items = [
+        HotItem(rank=i + 1, title=t, url=f"https://example.com/{i}") for i, t in enumerate(titles)
+    ]
+    items[0].summary = (
+        "这是一段足够长的视频简介，用来验证摘要会不会被截断到六十个字以内，"
+        "后面还有很多内容需要被切掉，否则整条消息会被摘要撑得很长很长"
+    )
+    items[1].summary = "五个字"
+    clusters = core.cluster_hits([("微博热搜", item) for item in items])
+    assert len(clusters) == 8  # 标题互不相同，不该被合并
+
+    text = main._render_new(clusters)
+    assert "https://example.com/0" in text
+    assert "https://example.com/7" in text  # 超过 5 组也要给链接
+    assert "…" in text  # 长摘要被截断
+    assert "五个字" not in text  # 太短的不当摘要
+
+    # 预览与正式推送只有抬头不同
+    assert "当前在榜" in main._render_new(clusters, preview=True)
+    assert "新上榜" in text
