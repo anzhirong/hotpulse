@@ -40,6 +40,24 @@
     "hint": "用 AstrBot 当前使用的模型，给每条热榜补一句「这是什么」。热榜接口只有标题，所以这是模型根据标题的推测，不是新闻原文，消息里会标注。关掉后只推标题与链接。",
     "default": true
   },
+  "digest_time": {
+    "type": "string",
+    "description": "定时总结推送时间",
+    "hint": "24 小时制 HH:MM，逗号分隔可多个，如 09:00,21:00。留空则关闭定时总结。走服务器时区",
+    "default": "09:00"
+  },
+  "digest_limit": {
+    "type": "int",
+    "description": "总结里最多列几条",
+    "hint": "1-15，默认 8。超出的显示「另有 N 组」",
+    "default": 8
+  },
+  "digest_ai": {
+    "type": "bool",
+    "description": "总结里加 AI 概括",
+    "hint": "用模型把这一批标题概括成 2-3 句「今天都在聊什么」。同样只依据标题，不是原文。",
+    "default": true
+  },
   "quiet_start": {
     "type": "int",
     "description": "静默开始时间（小时，0-23）",

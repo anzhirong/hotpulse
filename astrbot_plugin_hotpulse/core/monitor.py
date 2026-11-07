@@ -38,6 +38,9 @@ class SubscriptionStore:
     paused: bool = False
     # {源 key: {"at": 时间戳, "titles": [上一轮榜单标题]}}
     snapshots: dict[str, dict] = field(default_factory=dict)
+    # 已经发过的定时总结，形如 "2026-11-07 09:00"。
+    # 存下来是为了重启后不重复发同一次总结。
+    digest_sent: list[str] = field(default_factory=list)
 
     # ---------- 读写 ----------
 
@@ -71,6 +74,7 @@ class SubscriptionStore:
                     continue
                 if titles:
                     store.snapshots[str(key)] = {"at": at, "titles": titles}
+        store.digest_sent = [str(s) for s in data.get("digest_sent") or [] if str(s).strip()]
         return store
 
     def save(self) -> None:
@@ -82,6 +86,7 @@ class SubscriptionStore:
             "seen": self.seen,
             "paused": self.paused,
             "snapshots": self.snapshots,
+            "digest_sent": self.digest_sent,
         }
         tmp = self.path.with_suffix(".tmp")
         try:
@@ -167,3 +172,5 @@ class SubscriptionStore:
         self.snapshots = {
             k: v for k, v in self.snapshots.items() if float(v.get("at") or 0) >= cutoff
         }
+        # 只需要挡重复，留最近 30 条（一天两条也就半个月）足够
+        self.digest_sent = self.digest_sent[-30:]

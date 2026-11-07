@@ -753,3 +753,91 @@ def test_llm_request_hint_survives_broken_req():
         pass
 
     run(plugin.hint_hot_search_tool(FakeEvent("x"), Weird()))  # 不抛异常即可
+
+
+# ---------- 定时总结 ----------
+
+
+def _freeze(monkeypatch, hour: int, minute: int):
+    from datetime import datetime as real_datetime
+
+    class Frozen(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 7, hour, minute, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", Frozen)
+
+
+def test_digest_time_parsing(tmp_path):
+    plugin = make_plugin(tmp_path, ["AI"], [], config={"digest_time": "09:00, 21:30，7:05"})
+    assert plugin._digest_times() == ["09:00", "21:30", "07:05"]
+
+    plugin._raw_config = {"digest_time": "25:00, abc, 12:60, 8:00"}
+    assert plugin._digest_times() == ["08:00"]  # 非法值丢掉，不炸
+
+    plugin._raw_config = {"digest_time": ""}
+    assert plugin._digest_times() == []
+
+
+def test_digest_pushes_once_at_configured_minute(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path, ["AI"], ["lark:a"], config={"digest_time": "09:00"})
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 一号新闻", "无关的一条标题"])})
+    _freeze(monkeypatch, 9, 0)
+
+    run(plugin._maybe_digest())
+
+    assert len(plugin.context.sent) == 1
+    text = plugin.context.sent[0][1]
+    assert "热点总结" in text
+    assert "AI 一号新闻" in text
+    assert "无关的一条标题" not in text
+    assert "2026-11-07 09:00" in plugin._store.digest_sent
+
+    # 同一分钟、同一时间点不会重复推
+    plugin.context.sent.clear()
+    run(plugin._maybe_digest())
+    assert plugin.context.sent == []
+
+
+def test_digest_skips_when_minute_not_matched(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path, ["AI"], ["lark:a"], config={"digest_time": "09:00"})
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 一号新闻"])})
+    _freeze(monkeypatch, 9, 1)
+
+    run(plugin._maybe_digest())
+    assert plugin.context.sent == []
+
+
+def test_digest_marked_even_when_nothing_matched(tmp_path, monkeypatch):
+    """到点但榜上没有命中项：不发消息，但也要记下这一档，避免同一分钟反复抓取。"""
+    plugin = make_plugin(tmp_path, ["AI"], ["lark:a"], config={"digest_time": "09:00"})
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["完全无关的标题"])})
+    _freeze(monkeypatch, 9, 0)
+
+    run(plugin._maybe_digest())
+
+    assert plugin.context.sent == []
+    assert "2026-11-07 09:00" in plugin._store.digest_sent
+
+
+def test_digest_includes_ai_summary(tmp_path, monkeypatch):
+    provider = FakeProvider("今日主要在聊大模型的推理成本和 AI 短剧的内容生产。")
+    plugin = make_plugin(
+        tmp_path, ["AI"], ["lark:a"], provider=provider, config={"digest_time": "09:00"}
+    )
+    plugin.fetcher = FakeFetcher({"weibo": ("微博", ["AI 一号新闻"])})
+    _freeze(monkeypatch, 9, 0)
+
+    run(plugin._maybe_digest())
+
+    text = plugin.context.sent[0][1]
+    assert "今日主要在聊大模型的推理成本" in text
+    assert "不是原文" in text
+    assert provider.calls == 1
+
+
+def test_clean_summary_strips_preamble():
+    assert main._clean_summary("以下是总结：今天都在聊 AI。") == "今天都在聊 AI。"
+    assert main._clean_summary("太短") == ""  # 少于 10 字当没写
+    assert main._clean_summary("字" * 200).endswith("…")

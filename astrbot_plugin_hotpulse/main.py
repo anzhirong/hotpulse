@@ -123,6 +123,12 @@ _BRIEF_SYSTEM = (
 # 「1. 说明」「1、说明」「1)说明」都收
 _BRIEF_LINE = re.compile(r"^\s*(\d{1,2})\s*[.、)．]\s*(.+?)\s*$")
 
+# 定时总结里的整体概括。同样只许依据标题，不许补事实。
+_DIGEST_SYSTEM = (
+    "下面是用户关注主题今天在热榜上的标题。用 2 到 3 句中文概括这批人都在聊什么，"
+    "可以归类但不能编造标题里没有的事实、数字、结论。总长 80 字以内，直接给结论，不要客套。"
+)
+
 
 def _parse_briefs(text: str, count: int) -> list[str]:
     """把模型输出按编号对回标题。对不上、太短、太长的都丢掉，宁可空着。"""
@@ -226,7 +232,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.5.2")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.6.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -237,6 +243,7 @@ class HotPulsePlugin(Star):
         self._store: SubscriptionStore | None = None
         self._monitor_task: asyncio.Task | None = None
         self._kick_task: asyncio.Task | None = None
+        self._digest_task: asyncio.Task | None = None
 
     # ---------- 生命周期 ----------
 
@@ -270,11 +277,12 @@ class HotPulsePlugin(Star):
             logger.error(f"hotpulse 初始化连接池失败：{exc}")
 
         self._monitor_task = asyncio.create_task(self._monitor_loop())
+        self._digest_task = asyncio.create_task(self._digest_loop())
         logger.info("hotpulse 插件已加载（订阅关键词 %d 个）", len(self._store.keywords))
 
     async def terminate(self):
         """插件卸载/停用时停掉后台任务并释放连接池。"""
-        for task in (self._monitor_task, self._kick_task):
+        for task in (self._monitor_task, self._digest_task, self._kick_task):
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -675,6 +683,37 @@ class HotPulsePlugin(Star):
             delivered,
         )
 
+    async def _model_text(self, prompt: str, system_prompt: str) -> str:
+        """调一次 AstrBot 当前使用的模型，失败一律返回空串。
+
+        解读、日报都走这里，省得每处都写一遍 provider 获取和超时兜底。
+        """
+        try:
+            provider = self.context.get_using_provider()
+        except Exception as exc:
+            logger.warning(f"hotpulse 获取模型失败：{exc}")
+            return ""
+        if provider is None:
+            logger.info("hotpulse 未配置默认模型，跳过 AI 生成")
+            return ""
+
+        try:
+            response = await asyncio.wait_for(
+                provider.text_chat(prompt=prompt, system_prompt=system_prompt),
+                timeout=30,
+            )
+        except TypeError:
+            # 老版本的 text_chat 不接 system_prompt
+            try:
+                response = await asyncio.wait_for(provider.text_chat(prompt), timeout=30)
+            except Exception as exc:
+                logger.warning(f"hotpulse AI 生成失败：{exc}")
+                return ""
+        except Exception as exc:
+            logger.warning(f"hotpulse AI 生成失败：{exc}")
+            return ""
+        return getattr(response, "completion_text", "") or ""
+
     async def _ai_brief(self, clusters) -> list[str]:
         """用 AstrBot 当前使用的模型，给每条热榜补一句「这是什么」。
 
@@ -692,36 +731,102 @@ class HotPulsePlugin(Star):
         if not titles:
             return []
 
-        try:
-            provider = self.context.get_using_provider()
-        except Exception as exc:
-            logger.warning(f"hotpulse 获取模型失败，本条推送不带解读：{exc}")
-            return []
-        if provider is None:
-            logger.info("hotpulse 未配置默认模型，本条推送不带解读")
-            return []
-
         numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(titles, 1))
-        try:
-            response = await asyncio.wait_for(
-                provider.text_chat(prompt=numbered, system_prompt=_BRIEF_SYSTEM),
-                timeout=30,
-            )
-        except TypeError:
-            # 老版本的 text_chat 不接 system_prompt
-            try:
-                response = await asyncio.wait_for(provider.text_chat(numbered), timeout=30)
-            except Exception as exc:
-                logger.warning(f"hotpulse AI 解读失败：{exc}")
-                return []
-        except Exception as exc:
-            logger.warning(f"hotpulse AI 解读失败：{exc}")
-            return []
-
-        briefs = _parse_briefs(getattr(response, "completion_text", "") or "", len(titles))
-        got = sum(1 for b in briefs if b)
-        logger.info("hotpulse AI 解读 %d/%d 条", got, len(titles))
+        text = await self._model_text(numbered, _BRIEF_SYSTEM)
+        briefs = _parse_briefs(text, len(titles))
+        logger.info("hotpulse AI 解读 %d/%d 条", sum(1 for b in briefs if b), len(titles))
         return briefs
+
+    # ---------- 定时总结 ----------
+
+    def _digest_times(self) -> list[str]:
+        """配置里的推送时间，形如 ["09:00", "21:00"]。格式不对的直接丢掉。"""
+        raw = str(self._cfg("digest_time", "09:00") or "")
+        times: list[str] = []
+        for token in re.split(r"[,，、\s]+", raw):
+            token = token.strip()
+            if not token:
+                continue
+            matched = re.fullmatch(r"(\d{1,2}):(\d{2})", token)
+            if not matched:
+                logger.warning("hotpulse 总结时间「%s」不是 HH:MM，已忽略", token)
+                continue
+            hour, minute = int(matched.group(1)), int(matched.group(2))
+            if hour > 23 or minute > 59:
+                logger.warning("hotpulse 总结时间「%s」超出范围，已忽略", token)
+                continue
+            slot = f"{hour:02d}:{minute:02d}"
+            if slot not in times:
+                times.append(slot)
+        return times
+
+    async def _digest_loop(self):
+        """每 30 秒看一眼是不是到了推送时间。
+
+        不用 sleep 到下一个整点：容器时区、系统卡顿都会让长睡眠算错，
+        短轮询加「这个时间点已发过」的记录，简单且不会漏。
+        """
+        try:
+            while True:
+                try:
+                    await self._maybe_digest()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(f"hotpulse 总结推送异常：{exc}")
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            logger.info("hotpulse 总结循环已停止")
+            raise
+
+    async def _maybe_digest(self):
+        store = self._store
+        if store is None or store.paused or not store.keywords or not store.sessions:
+            return
+        if MessageChain is None:
+            return
+
+        times = self._digest_times()
+        if not times:
+            return
+
+        now = datetime.now()
+        slot = f"{now:%Y-%m-%d} {now:%H:%M}"
+        if now.strftime("%H:%M") not in times or slot in store.digest_sent:
+            return
+
+        # 先记下来再抓取：抓取要几十秒，这期间循环可能再进来一次，会导致重复推
+        store.digest_sent.append(slot)
+        store.save()
+
+        results = await self.fetcher.fetch_many(list(ALL_SOURCES), 50)
+        pairs = [
+            (result.source_name, item)
+            for result in results
+            if result.ok
+            for item in result.items
+            if match_title(item.title, store.keywords)
+        ]
+        if not pairs:
+            logger.info("hotpulse %s 总结：当前没有命中项，跳过", slot)
+            return
+
+        limit = max(1, min(self._as_int(self._cfg("digest_limit", 8), 8), 15))
+        clusters = cluster_hits(pairs)
+        summary = ""
+        if self._cfg_bool("digest_ai", True):
+            titles = "\n".join(f"{i}. {c.title}" for i, c in enumerate(clusters[:15], 1))
+            summary = _clean_summary(await self._model_text(titles, _DIGEST_SYSTEM))
+
+        text = _render_digest(clusters, limit, summary, "、".join(self._digest_times()))
+        delivered = 0
+        for session in list(store.sessions):
+            try:
+                ok = await self.context.send_message(session, MessageChain().message(text))
+                delivered += 1 if ok else 0
+            except Exception as exc:
+                logger.warning(f"hotpulse 总结推送到 {session} 失败：{exc}")
+        logger.info("hotpulse %s 定时总结 %d 组，送达 %d 个会话", slot, len(clusters), delivered)
 
     def _render_monitor_status(self) -> str:
         store = self._store
@@ -747,6 +852,13 @@ class HotPulsePlugin(Star):
         quiet = self._quiet_range_text()
         if quiet:
             lines.append(f"静默时段：{quiet}")
+        times = self._digest_times()
+        if times:
+            lines.append(f"定时总结：每天 {'、'.join(times)}")
+            if store.digest_sent:
+                lines.append(f"上次总结：{store.digest_sent[-1]}")
+        else:
+            lines.append("定时总结：未开启（配置 digest_time 留空）")
         if store.keywords:
             lines.append(f"关注（{len(store.keywords)}）：{'、'.join(store.keywords)}")
         else:
@@ -912,6 +1024,53 @@ def _variants_hint(keywords: list[str]) -> str:
     if len(words) <= len(keywords):
         return ""
     return "（已按同义词组展开：" + "、".join(words[:8]) + "）"
+
+
+def _clean_summary(text: str, limit: int = 120) -> str:
+    """模型写的整体概括：压成一段，去掉常见客套开头，太短当没写。"""
+    clean = " ".join((text or "").split())
+    # 「以下是总结：」这种要连剥两层，所以循环而不是只剥一次
+    changed = True
+    while changed and clean:
+        changed = False
+        for prefix in ("以下是", "总结：", "总结:", "概括：", "概括:", "日报：", "日报:"):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix) :].lstrip("：:，, ")
+                changed = True
+                break
+    if len(clean) < 8:
+        return ""
+    return clean if len(clean) <= limit else clean[:limit] + "…"
+
+
+def _render_digest(clusters, limit: int, summary: str = "", times: str = "") -> str:
+    """定时总结：先给一段整体概括，再列条目。和即时推送的区别是有「今天都在聊什么」。"""
+    lines = [f"📊 热点总结 · {datetime.now():%m-%d %H:%M}", ""]
+    if summary:
+        lines.append(f"💭 {summary}")
+        lines.append("")
+
+    for index, cluster in enumerate(clusters[:limit], 1):
+        lines.append(f"{index}. {cluster.title}")
+        lead = min(cluster.items, key=lambda i: getattr(i, "rank", 99) or 99)
+        meta = " · ".join(x for x in (" · ".join(cluster.sources), _hot_text(lead)) if x)
+        if meta:
+            lines.append(f"   {meta}")
+        url = next(
+            (getattr(i, "url", None) for i in cluster.items if getattr(i, "url", None)), None
+        )
+        if url:
+            lines.append(f"   {url}")
+
+    if len(clusters) > limit:
+        lines.append(f"…另有 {len(clusters) - limit} 组，发 /热点 搜 关键词 看全榜")
+
+    lines.append("")
+    when = f"每天 {times} 推一次" if times else "定时推送"
+    lines.append(f"· {when}，可在插件配置的 digest_time 调整")
+    if summary:
+        lines.append("· 💭 = AI 根据标题概括，不是原文")
+    return "\n".join(lines)
 
 
 def _render_new(clusters, preview: bool = False, briefs: list[str] | None = None) -> str:
