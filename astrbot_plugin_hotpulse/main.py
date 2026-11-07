@@ -68,6 +68,9 @@ HotPulseFetcher = _core.HotPulseFetcher
 SubscriptionStore = _core.SubscriptionStore
 match_title = _core.match_title
 cluster_hits = _core.cluster_hits
+cloud_compare = _core.compare
+CLOUD_SPECS = _core.SPECS
+DEFAULT_SPEC = _core.DEFAULT_SPEC
 split_def = _core.split_def
 variants = _core.variants
 configure = _core.configure
@@ -106,7 +109,8 @@ _HELP = (
     "· /热点 搜 AI      从全平台里筛出含关键词的\n"
     "· /热点源          查看所有可用平台\n"
     "· /热点监控 AI     订阅关键词，新上榜才推送\n"
-    "· /热点监控列表    看监控状态"
+    "· /热点监控列表    看监控状态\n"
+    "· /云价 2核4G      阿里云/腾讯云同规格比价"
 )
 
 # 这些不是摘要，只是平台的标记，显示出来反而误导
@@ -232,7 +236,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.6.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.7.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -257,6 +261,10 @@ class HotPulsePlugin(Star):
             timeout=self._as_float(self._cfg("timeout", 8), 8.0),
             weibo_cookie=str(self._cfg("weibo_cookie", "") or ""),
             zhihu_cookie=str(self._cfg("zhihu_cookie", "") or ""),
+            aliyun_ak=str(self._cfg("aliyun_ak", "") or "").strip(),
+            aliyun_sk=str(self._cfg("aliyun_sk", "") or "").strip(),
+            tencent_secret_id=str(self._cfg("tencent_secret_id", "") or "").strip(),
+            tencent_secret_key=str(self._cfg("tencent_secret_key", "") or "").strip(),
         )
 
         store_path = _resolve_data_dir() / "subscriptions.json"
@@ -364,6 +372,14 @@ class HotPulsePlugin(Star):
         """订阅关键词，命中词新上榜就推送。用法：/热点监控 [关键词|列表|删除|清空|关闭|开启]"""
         async for reply in self._monitor_command(event, self._strip_prefix(event.message_str)):
             yield reply
+
+    @filter.command("云价", alias={"云比价", "云服务器"})
+    async def cloud_price(self, event: AstrMessageEvent):
+        """查阿里云 / 腾讯云同规格服务器的官方价并对比。用法：/云价 [2核4G|4核8G]"""
+        tokens = _split_words(self._strip_prefix(event.message_str))
+        spec = next((t for t in tokens if t in CLOUD_SPECS), DEFAULT_SPEC)
+        results, skipped = await cloud_compare(spec)
+        yield event.plain_result(_render_cloud(results, spec, skipped))
 
     # 自然语言入口：用户说「我想看 AI 相关热点」时，由模型自己决定调这个工具，
     # 不需要记 /热点 搜 这种指令。参数 schema 是从下面的 docstring 解析出来的，
@@ -740,25 +756,8 @@ class HotPulsePlugin(Star):
     # ---------- 定时总结 ----------
 
     def _digest_times(self) -> list[str]:
-        """配置里的推送时间，形如 ["09:00", "21:00"]。格式不对的直接丢掉。"""
-        raw = str(self._cfg("digest_time", "09:00") or "")
-        times: list[str] = []
-        for token in re.split(r"[,，、\s]+", raw):
-            token = token.strip()
-            if not token:
-                continue
-            matched = re.fullmatch(r"(\d{1,2}):(\d{2})", token)
-            if not matched:
-                logger.warning("hotpulse 总结时间「%s」不是 HH:MM，已忽略", token)
-                continue
-            hour, minute = int(matched.group(1)), int(matched.group(2))
-            if hour > 23 or minute > 59:
-                logger.warning("hotpulse 总结时间「%s」超出范围，已忽略", token)
-                continue
-            slot = f"{hour:02d}:{minute:02d}"
-            if slot not in times:
-                times.append(slot)
-        return times
+        """配置里的总结推送时间，形如 ["09:00", "21:00"]。"""
+        return self._times_of("digest_time")
 
     async def _digest_loop(self):
         """每 30 秒看一眼是不是到了推送时间。
@@ -770,14 +769,75 @@ class HotPulsePlugin(Star):
             while True:
                 try:
                     await self._maybe_digest()
+                    await self._maybe_cloud()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logger.error(f"hotpulse 总结推送异常：{exc}")
+                    logger.error(f"hotpulse 定时任务异常：{exc}")
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
-            logger.info("hotpulse 总结循环已停止")
+            logger.info("hotpulse 定时循环已停止")
             raise
+
+    def _times_of(self, key: str) -> list[str]:
+        """读一个 HH:MM 列表配置。格式不对的丢掉并留日志，不让它拖垮整个定时任务。"""
+        raw = str(self._cfg(key, "") or "")
+        times: list[str] = []
+        for token in re.split(r"[,，、\s]+", raw):
+            token = token.strip()
+            if not token:
+                continue
+            matched = re.fullmatch(r"(\d{1,2}):(\d{2})", token)
+            if not matched:
+                logger.warning("hotpulse %s 里的「%s」不是 HH:MM，已忽略", key, token)
+                continue
+            hour, minute = int(matched.group(1)), int(matched.group(2))
+            if hour > 23 or minute > 59:
+                logger.warning("hotpulse %s 里的「%s」超出范围，已忽略", key, token)
+                continue
+            slot = f"{hour:02d}:{minute:02d}"
+            if slot not in times:
+                times.append(slot)
+        return times
+
+    async def _maybe_cloud(self):
+        """到点推一次云服务器比价。没有会话或没填密钥就不折腾。"""
+        store = self._store
+        if store is None or not store.sessions:
+            return
+        if not self._cfg_bool("cloud_enabled", False):
+            return
+
+        times = self._times_of("cloud_time")
+        if not times:
+            return
+        now = datetime.now()
+        slot = f"{now:%Y-%m-%d} {now:%H:%M}"
+        key = f"cloud {slot}"
+        if now.strftime("%H:%M") not in times or key in store.digest_sent:
+            return
+
+        spec = str(self._cfg("cloud_spec", DEFAULT_SPEC) or DEFAULT_SPEC)
+        if spec not in CLOUD_SPECS:
+            spec = DEFAULT_SPEC
+
+        store.digest_sent.append(key)
+        store.save()
+
+        results, skipped = await cloud_compare(spec)
+        if not results:
+            logger.info("hotpulse %s 云比价：没填任何密钥，跳过", slot)
+            return
+
+        text = _render_cloud(results, spec, skipped)
+        delivered = 0
+        for session in list(store.sessions):
+            try:
+                ok = await self.context.send_message(session, MessageChain().message(text))
+                delivered += 1 if ok else 0
+            except Exception as exc:
+                logger.warning(f"hotpulse 云比价推送到 {session} 失败：{exc}")
+        logger.info("hotpulse %s 云比价（%s）送达 %d 个会话", slot, spec, delivered)
 
     async def _maybe_digest(self):
         store = self._store
@@ -1070,6 +1130,54 @@ def _render_digest(clusters, limit: int, summary: str = "", times: str = "") -> 
     lines.append(f"· {when}，可在插件配置的 digest_time 调整")
     if summary:
         lines.append("· 💭 = AI 根据标题概括，不是原文")
+    return "\n".join(lines)
+
+
+def _render_cloud(results, spec: str, skipped: str = "") -> str:
+    """比价结果。核心是最后那行差额，前面都是为它做铺垫。"""
+    ok = [r for r in results if r.ok and r.quote]
+    lines = [f"💰 云服务器比价 · {spec} 包年", ""]
+
+    if not ok:
+        lines.append("这次两家都没查成功：")
+        for result in results:
+            lines.append(f"· {result.vendor}：{result.error}")
+        if skipped:
+            lines.append(f"· 未参与：{skipped}")
+        lines.append("")
+        lines.append("常见原因：密钥没填 / 权限不足 / 该地域不卖这个型号。")
+        return "\n".join(lines)
+
+    for result in ok:
+        quote = result.quote
+        line = f"{quote.vendor}  {quote.price:,.2f} 元/{quote.period}"
+        if quote.discount:
+            line += f"（原价 {quote.list_price:,.2f}，省 {quote.discount:.0%}）"
+        lines.append(line)
+
+    for result in results:
+        if not result.ok:
+            lines.append(f"{result.vendor}  查不到：{result.error}")
+
+    if len(ok) == 2:
+        left, right = ok[0].quote, ok[1].quote
+        cheap, dear = (left, right) if left.price <= right.price else (right, left)
+        diff = dear.price - cheap.price
+        pct = diff / dear.price * 100 if dear.price else 0
+        lines.append("")
+        if diff < 0.01:
+            lines.append("→ 两家一个价（差不到 1 分）")
+        else:
+            lines.append(f"→ {cheap.vendor}便宜 {diff:,.2f} 元（{pct:.1f}%）")
+
+    if skipped:
+        lines.append("")
+        lines.append(f"未参与：{skipped}")
+    lines.append("")
+    lines.append("口径：官方目录价 + 官方折扣，不含限时活动价、代金券、学生优惠。")
+    lines.append("活动价以官网活动页和下单页为准，这里只做同规格横向对比。")
+    specs = "、".join(CLOUD_SPECS)
+    lines.append(f"· 换规格：/云价 {specs}")
     return "\n".join(lines)
 
 

@@ -58,6 +58,50 @@
     "hint": "用模型把这一批标题概括成 2-3 句「今天都在聊什么」。同样只依据标题，不是原文。",
     "default": true
   },
+  "cloud_enabled": {
+    "type": "bool",
+    "description": "云服务器比价",
+    "hint": "每天定时对比阿里云/腾讯云同规格服务器的官方价。填了下面的密钥才会真正查询。",
+    "default": false
+  },
+  "cloud_time": {
+    "type": "string",
+    "description": "比价推送时间",
+    "hint": "24 小时制 HH:MM，可多个如 09:10,21:10。留空则不推",
+    "default": "09:10"
+  },
+  "cloud_spec": {
+    "type": "string",
+    "description": "默认比价规格",
+    "hint": "2核4G 或 4核8G（两家都有标准型号，2核2G 在腾讯云标准型里没有）",
+    "default": "2核4G"
+  },
+  "aliyun_ak": {
+    "type": "string",
+    "description": "阿里云 AccessKey ID",
+    "hint": "只用于调询价接口。建议单独建一个子账号，只给 ECS 只读权限",
+    "default": "",
+    "secret": true
+  },
+  "aliyun_sk": {
+    "type": "string",
+    "description": "阿里云 AccessKey Secret",
+    "default": "",
+    "secret": true
+  },
+  "tencent_secret_id": {
+    "type": "string",
+    "description": "腾讯云 SecretId",
+    "hint": "建议用子账号，只授予 QcloudCVMReadOnlyAccess",
+    "default": "",
+    "secret": true
+  },
+  "tencent_secret_key": {
+    "type": "string",
+    "description": "腾讯云 SecretKey",
+    "default": "",
+    "secret": true
+  },
   "quiet_start": {
     "type": "int",
     "description": "静默开始时间（小时，0-23）",

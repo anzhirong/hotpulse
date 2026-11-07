@@ -13,11 +13,20 @@ class Settings:
     fail_ttl: int = 30
     weibo_cookie: str = ""
     zhihu_cookie: str = ""
+    # 云服务器询价用的密钥，只用于调官方价格接口，不碰任何资源
+    aliyun_ak: str = ""
+    aliyun_sk: str = ""
+    tencent_secret_id: str = ""
+    tencent_secret_key: str = ""
 
 
 _settings = Settings(
     weibo_cookie=os.environ.get("WEIBO_COOKIE", ""),
     zhihu_cookie=os.environ.get("ZHIHU_COOKIE", ""),
+    aliyun_ak=os.environ.get("ALIYUN_ACCESS_KEY_ID", ""),
+    aliyun_sk=os.environ.get("ALIYUN_ACCESS_KEY_SECRET", ""),
+    tencent_secret_id=os.environ.get("TENCENTCLOUD_SECRET_ID", ""),
+    tencent_secret_key=os.environ.get("TENCENTCLOUD_SECRET_KEY", ""),
 )
 
 # 内核默认用自己的 logger；插件初始化时会把 AstrBot 的 logger 注入进来，

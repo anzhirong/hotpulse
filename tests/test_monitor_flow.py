@@ -7,6 +7,7 @@ AstrBot 不在开发机上跑，所以这里用最小的假模块顶替 astrbot.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -841,3 +842,138 @@ def test_clean_summary_strips_preamble():
     assert main._clean_summary("以下是总结：今天都在聊 AI。") == "今天都在聊 AI。"
     assert main._clean_summary("太短") == ""  # 少于 10 字当没写
     assert main._clean_summary("字" * 200).endswith("…")
+
+
+# ---------- 云服务器比价 ----------
+# 签名是最容易写错、又最难靠肉眼发现的部分，所以直接用官方文档的固定向量断言。
+
+
+def test_aliyun_signature_matches_official_vector():
+    """阿里云官方文档「固定参数示例」：AccessKeyId=testid / Secret=testsecret，
+    期望签名 9NaGiOspFP5UPcwX8Iwt2YJXXuk=。对不上就说明签名算法错了。"""
+    params = {
+        "AccessKeyId": "testid",
+        "Action": "DescribeDedicatedHosts",
+        "Format": "JSON",
+        "RegionId": "cn-beijing",
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": "edb2b34af0af9a6d14deaf7c1a5315eb",
+        "SignatureVersion": "1.0",
+        "Timestamp": "2023-03-13T08:34:30Z",
+        "Version": "2014-05-26",
+    }
+    assert core.aliyun_signature(params, "testsecret") == "9NaGiOspFP5UPcwX8Iwt2YJXXuk="
+
+
+def test_tencent_authorization_structure_and_utc_date():
+    """腾讯云文档示例的密钥是脱敏的，只能验与密钥无关的部分：
+    payload 哈希、UTC 日期（东八区跨零点时会差一天，这里 1551113065 = UTC 2019-02-25）。"""
+    payload = (
+        '{"Limit": 1, "Filters": [{"Values": ["\\u672a\\u547d\\u540d"], "Name": "instance-name"}]}'
+    )
+    assert (
+        hashlib.sha256(payload.encode()).hexdigest()
+        == "35e9c5b0e3ae67532d3c9f17ead6c90222632e5b1ff7f6e89887f1398934f064"
+    )
+
+    auth = core.tencent_authorization(
+        "AKIDtest",
+        "secrettest",
+        "cvm",
+        "cvm.tencentcloudapi.com",
+        "DescribeInstances",
+        payload,
+        1551113065,
+        "ap-guangzhou",
+    )
+    assert auth.startswith("TC3-HMAC-SHA256 Credential=AKIDtest/2019-02-25/cvm/tc3_request")
+    assert "SignedHeaders=content-type;host;x-tc-action" in auth
+    assert len(auth.rsplit("Signature=", 1)[1]) == 64  # sha256 十六进制
+
+
+def _quote(vendor, price, list_price=None):
+    return core.Quote(
+        vendor=vendor,
+        spec="2核4G",
+        price=price,
+        list_price=list_price,
+        period="1年",
+        region="test",
+    )
+
+
+def test_render_cloud_shows_price_gap():
+    results = [
+        core.QuoteResult("阿里云", True, _quote("阿里云", 1234.0, 1800.0)),
+        core.QuoteResult("腾讯云", True, _quote("腾讯云", 980.0)),
+    ]
+    text = main._render_cloud(results, "2核4G")
+    assert "阿里云  1,234.00 元/1年" in text
+    assert "原价 1,800.00，省 31%" in text
+    assert "腾讯云便宜 254.00 元" in text
+    assert "不含限时活动价" in text  # 口径必须写清楚，否则会被拿去和 99 元/年 对比
+
+
+def test_render_cloud_one_side_failed():
+    results = [
+        core.QuoteResult("阿里云", True, _quote("阿里云", 1234.0)),
+        core.QuoteResult("腾讯云", False, error="AuthFailure.SignatureFailure: 签名错误"),
+    ]
+    text = main._render_cloud(results, "2核4G")
+    assert "阿里云  1,234.00" in text
+    assert "腾讯云  查不到：AuthFailure" in text
+    assert "便宜" not in text  # 只有一家，不能算差价
+
+
+def test_render_cloud_when_nothing_works():
+    results = [core.QuoteResult("阿里云", False, error="InvalidAccessKeyId.NotFound")]
+    text = main._render_cloud(results, "2核4G", skipped="腾讯云（未填 SecretId）")
+    assert "都没查成功" in text
+    assert "InvalidAccessKeyId" in text
+    assert "未填 SecretId" in text
+
+
+def test_maybe_cloud_pushes_at_configured_time(tmp_path, monkeypatch):
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": True, "cloud_time": "09:10"}
+    )
+
+    async def fake_compare(spec):
+        return [
+            core.QuoteResult("阿里云", True, _quote("阿里云", 1234.0, 1800.0)),
+            core.QuoteResult("腾讯云", True, _quote("腾讯云", 980.0)),
+        ], ""
+
+    monkeypatch.setattr(main, "cloud_compare", fake_compare)
+    _freeze(monkeypatch, 9, 10)
+
+    run(plugin._maybe_cloud())
+
+    assert len(plugin.context.sent) == 1
+    assert "腾讯云便宜 254.00 元" in plugin.context.sent[0][1]
+    assert "cloud 2026-11-07 09:10" in plugin._store.digest_sent
+
+    plugin.context.sent.clear()
+    run(plugin._maybe_cloud())  # 同一档不重复
+    assert plugin.context.sent == []
+
+
+def test_maybe_cloud_respects_switch(tmp_path, monkeypatch):
+    plugin = make_plugin(
+        tmp_path, [], ["lark:a"], config={"cloud_enabled": False, "cloud_time": "09:10"}
+    )
+    called = []
+
+    async def fake_compare(spec):
+        called.append(spec)
+        return [], ""
+
+    monkeypatch.setattr(main, "cloud_compare", fake_compare)
+    _freeze(monkeypatch, 9, 10)
+    run(plugin._maybe_cloud())
+    assert called == [] and plugin.context.sent == []
+
+
+def test_times_of_ignores_garbage():
+    plugin = make_plugin(Path(".") / "unused", [], [], config={"cloud_time": "9:10，25:99, xx"})
+    assert plugin._times_of("cloud_time") == ["09:10"]

@@ -4,6 +4,17 @@
 只需要「抓取 + 归一化」这一层能力，HTTP 服务那套东西在这里是负担。
 """
 
+from .cloud import (
+    DEFAULT_SPEC,
+    SPECS,
+    Quote,
+    QuoteResult,
+    aliyun_signature,
+    compare,
+    fetch_aliyun_price,
+    fetch_tencent_price,
+    tencent_authorization,
+)
 from .fetcher import HotPulseFetcher
 from .match import Cluster, cluster_hits, match_title, split_def, variants
 from .models import HotItem, SourceResult
@@ -19,14 +30,22 @@ from .sources import ALL_SOURCES, resolve, resolve_many
 
 __all__ = [
     "ALL_SOURCES",
+    "DEFAULT_SPEC",
+    "SPECS",
     "Cluster",
     "HotItem",
     "HotPulseFetcher",
+    "Quote",
+    "QuoteResult",
     "Settings",
     "SourceResult",
     "SubscriptionStore",
+    "aliyun_signature",
     "cluster_hits",
+    "compare",
     "configure",
+    "fetch_aliyun_price",
+    "fetch_tencent_price",
     "get_logger",
     "get_settings",
     "match_title",
@@ -34,5 +53,6 @@ __all__ = [
     "resolve_many",
     "set_logger",
     "split_def",
+    "tencent_authorization",
     "variants",
 ]
