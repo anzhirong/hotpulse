@@ -1,0 +1,32 @@
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# ==== 环境与密钥（红线：绝不入库）====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/.ssh/*.pub
+
+# ==== 运行时数据 ====
+*.db
+*.sqlite3
+logs/
+*.log
+# 插件的订阅数据（本地运行时生成，不该入库）
+astrbot_plugin_hotpulse/data/
+
+# ==== 编辑器 / 系统 ====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

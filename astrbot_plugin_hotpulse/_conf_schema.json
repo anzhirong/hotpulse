@@ -1,0 +1,63 @@
+{
+  "default_sources": {
+    "type": "string",
+    "description": "默认查询的平台",
+    "hint": "逗号分隔的英文标识，如 weibo,baidu,toutiao。留空则使用前三个平台",
+    "default": "weibo,baidu,toutiao"
+  },
+  "default_limit": {
+    "type": "int",
+    "description": "每个平台默认返回条数",
+    "hint": "1-20，条数越多消息越长",
+    "default": 5
+  },
+  "cache_ttl": {
+    "type": "int",
+    "description": "缓存时间（秒）",
+    "hint": "越小越实时，越大越省上游请求。建议 300",
+    "default": 300
+  },
+  "timeout": {
+    "type": "int",
+    "description": "单次抓取超时（秒）",
+    "default": 8
+  },
+  "monitor_keywords": {
+    "type": "string",
+    "description": "初始监控关键词",
+    "hint": "仅在本地还没有订阅时导入一次，之后以聊天里的 /热点监控 为准。逗号分隔，建议包含同义词",
+    "default": ""
+  },
+  "monitor_interval": {
+    "type": "int",
+    "description": "监控扫描间隔（秒）",
+    "hint": "最小 300（5 分钟）。默认 1800 即半小时一轮，不建议更频繁",
+    "default": 1800
+  },
+  "quiet_start": {
+    "type": "int",
+    "description": "静默开始时间（小时，0-23）",
+    "hint": "这个时段内不抓取也不推送，默认 23 点",
+    "default": 23
+  },
+  "quiet_end": {
+    "type": "int",
+    "description": "静默结束时间（小时，0-23）",
+    "hint": "默认 7 点。与开始时间相同表示全天不静默",
+    "default": 7
+  },
+  "weibo_cookie": {
+    "type": "string",
+    "description": "微博 Cookie（可选）",
+    "hint": "部分服务器 IP 不填会被返回空数据。浏览器登录微博后从开发者工具复制",
+    "default": "",
+    "secret": true
+  },
+  "zhihu_cookie": {
+    "type": "string",
+    "description": "知乎 Cookie（可选）",
+    "hint": "知乎已强制登录校验，不填则知乎平台不可用",
+    "default": "",
+    "secret": true
+  }
+}

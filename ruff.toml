@@ -1,0 +1,11 @@
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "__pycache__"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# 本项目代码中含大量中文注释与文案，全角标点属正常写法
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[lint.isort]
+known-first-party = ["astrbot_plugin_hotpulse"]

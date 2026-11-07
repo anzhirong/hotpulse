@@ -1,0 +1,14 @@
+# 仓库内统一 LF，避免 Windows 的 CRLF 混入（Python / Linux 部署友好）
+* text=auto eol=lf
+
+# 二进制
+*.zip binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+
+# Windows 脚本保留 CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
