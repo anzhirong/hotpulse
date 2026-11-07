@@ -160,7 +160,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.1")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.2")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
