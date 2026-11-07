@@ -192,7 +192,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.4")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.5")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -736,7 +736,10 @@ def _render_new(clusters, preview: bool = False) -> str:
             lines.append(f"…另有 {len(clusters) - index} 条")
             break
         lines.append(f"{index + 1}. {cluster.title}")
-        meta = " · ".join(x for x in (" · ".join(cluster.sources), _fmt_hot(cluster.hot)) if x)
+        # 热度取榜内名次最好的那条，顺便带出单位（播放/阅读/热度），
+        # 否则「8808」这种数字看不出是什么
+        lead = min(cluster.items, key=lambda i: getattr(i, "rank", 99) or 99)
+        meta = " · ".join(x for x in (" · ".join(cluster.sources), _hot_text(lead)) if x)
         if meta:
             lines.append(f"   {meta}")
         if with_url:

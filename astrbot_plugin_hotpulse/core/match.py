@@ -125,11 +125,22 @@ class Cluster:
         values = [getattr(i, "hot", None) for i in self.items]
         return max((v for v in values if isinstance(v, (int, float))), default=0.0)
 
+    @property
+    def rank(self) -> int:
+        """这条事件在各自榜单里拿到的最好名次。
+
+        排序不能直接比 hot：36氪 是它自己的评分（几千），微博是热度值、B站是
+        播放量（几百万），拿三种单位比大小，36氪 永远垫底。名次才是可比的。
+        """
+        values = [getattr(i, "rank", None) for i in self.items]
+        return min((v for v in values if isinstance(v, int) and v > 0), default=999)
+
 
 def cluster_hits(pairs: list[tuple[str, object]]) -> list[Cluster]:
-    """把 (平台名, 条目) 合并成簇，按「跨平台数 → 热度」排序。
+    """把 (平台名, 条目) 合并成簇，按「跨平台数 → 榜内名次 → 热度」排序。
 
-    顺序很关键：跨 3 个平台都上榜的，才是真的热；单源独家排在后面。
+    顺序很关键：跨 3 个平台都上榜的，才是真的热；同平台名次越靠前越热；
+    热度只作为最后的兜底，因为它的单位每个平台都不一样。
     """
     clusters: list[Cluster] = []
     for source_name, item in pairs:
@@ -147,5 +158,5 @@ def cluster_hits(pairs: list[tuple[str, object]]) -> list[Cluster]:
         else:
             clusters.append(Cluster(title=title, sources=[source_name], items=[item]))
 
-    clusters.sort(key=lambda c: (-len(c.sources), -c.hot))
+    clusters.sort(key=lambda c: (-len(c.sources), c.rank, -c.hot))
     return clusters

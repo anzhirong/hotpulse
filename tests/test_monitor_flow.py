@@ -498,3 +498,31 @@ def test_monitor_aliases_all_survive_prefix_strip():
     for alias in main._MONITOR_ALIASES:
         raw = plugin._strip_prefix("/" + alias)
         assert raw.startswith("监控"), f"{alias} -> {raw}"
+
+
+# ---------- 排序 ----------
+
+
+def test_cluster_sort_uses_rank_not_raw_hot():
+    """36氪 的 hot 是阅读数（几千），B站是播放量（几百万），直接比 hot 排序
+    会让 36氪 的榜首永远垫底。名次才是跨平台可比的。"""
+    clusters = core.cluster_hits(
+        [
+            ("36氪热榜", HotItem(rank=1, title="丙 某个行业观察", hot=9000)),
+            ("B站热门", HotItem(rank=9, title="丁 某个视频标题", hot=4_000_000)),
+        ]
+    )
+    assert [c.title for c in clusters] == ["丙 某个行业观察", "丁 某个视频标题"]
+
+
+def test_cluster_sort_cross_source_still_wins():
+    """跨平台条数优先于名次：三个平台都上的事，比单平台第 1 名更值得排在前面。"""
+    clusters = core.cluster_hits(
+        [
+            ("微博热搜", HotItem(rank=1, title="某公司发布新一代AI大模型")),
+            ("百度热搜", HotItem(rank=6, title="某公司发布新一代AI大模型 参数翻倍")),
+            ("B站热门", HotItem(rank=1, title="完全无关的另一个视频")),
+        ]
+    )
+    assert len(clusters[0].sources) == 2
+    assert clusters[0].rank == 1

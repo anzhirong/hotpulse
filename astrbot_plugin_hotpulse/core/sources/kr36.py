@@ -52,7 +52,9 @@ class Kr36Source(Source):
                     title=title,
                     url=f"https://36kr.com/p/{item_id}" if item_id else None,
                     hot=float(score) if isinstance(score, (int, float)) else None,
-                    hot_text=str(score) if score else None,
+                    # statRead 是阅读数。带上单位，否则一条「8808」摆在别家
+                    # 「295.5万」旁边，用户会以为数据出错了
+                    hot_text=f"{score}阅读" if score else None,
                     summary=self._snippet(material.get("summary")),
                     cover=material.get("widgetImage"),
                     extra={"author": material.get("authorName")},
