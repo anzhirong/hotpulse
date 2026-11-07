@@ -21,6 +21,8 @@ import base64
 import hashlib
 import hmac
 import json
+import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,6 +41,87 @@ SPECS: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_SPEC = "2核4G"
+
+_ACTIVITY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+# 活动页比价页好抓得多：价格和配置虽然在不同 DOM 节点，但都躺在 HTML 里，
+# 抓下来交给模型归纳比硬解析靠谱。代价是碎片化、口径不一，所以要标明出处。
+ACTIVITY_SITES: list[tuple[str, str]] = [
+    ("阿里云", "https://www.aliyun.com/activity"),
+    ("腾讯云", "https://cloud.tencent.com/act"),
+    ("华为云", "https://activity.huaweicloud.com/discount_area_v5/index.html"),
+]
+
+# 判一条文本值不值得留下：必须提到钱，或者提到促销动作
+_PROMO_RE = re.compile(r"(\d+(?:\.\d+)?\s*元|低至|直降|秒杀|特惠|特价|限时|折扣|新客|新用户|首购)")
+# 明显没用的行（导航、登录提示、备案）
+_NOISE_RE = re.compile(r"(登录|注册|备案|客服|隐私|协议|Copyright|©|ICP)")
+
+_ACTIVITY_TTL = 600
+_activity_cache: dict[str, object] = {"at": 0.0, "data": {}}
+
+
+def extract_promo_lines(html: str, limit: int = 15) -> list[str]:
+    """从活动页 HTML 里挑出「像在说价格」的短句。
+
+    不做结构化：价格和配置常常分属两个节点，硬凑成「2核4G 99元」会错。
+    这里只保证「这行提到了钱或促销」，剩下的交给模型归纳。
+    """
+    body = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S)
+    body = re.sub(r"<[^>]+>", "\n", body)
+    chunks = [re.sub(r"\s+", " ", c).strip() for c in re.split(r"[。\n|]", body)]
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if not (6 <= len(chunk) <= 90):
+            continue
+        if not _PROMO_RE.search(chunk) or _NOISE_RE.search(chunk):
+            continue
+        if chunk in seen:
+            continue
+        seen.add(chunk)
+        lines.append(chunk)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+async def fetch_activities(ttl: int = _ACTIVITY_TTL) -> dict[str, dict]:
+    """并发抓三家活动页，返回 {厂商: {"url": 页面, "lines": [...]}}。
+
+    单站失败就留空，不影响其他站；十分钟内重复调用直接给缓存，别反复打人家首页。
+    """
+    now = time.monotonic()
+    if _activity_cache["data"] and now - float(_activity_cache["at"] or 0) < ttl:
+        return _activity_cache["data"]  # type: ignore[return-value]
+
+    settings = get_settings()
+    logger = get_logger()
+
+    async def one(client: httpx.AsyncClient, name: str, url: str) -> tuple[str, dict]:
+        try:
+            resp = await client.get(url)
+            lines = extract_promo_lines(resp.text)
+        except Exception as exc:
+            logger.warning("云活动 %s 抓取失败：%s", name, exc)
+            lines = []
+        return name, {"url": url, "lines": lines}
+
+    async with httpx.AsyncClient(
+        timeout=settings.timeout + 7, follow_redirects=True, headers=_ACTIVITY_HEADERS
+    ) as client:
+        pairs = await asyncio.gather(*(one(client, n, u) for n, u in ACTIVITY_SITES))
+    data = dict(pairs)
+    _activity_cache["at"] = now
+    _activity_cache["data"] = data
+    return data
 
 
 @dataclass

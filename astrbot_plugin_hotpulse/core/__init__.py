@@ -5,12 +5,15 @@
 """
 
 from .cloud import (
+    ACTIVITY_SITES,
     DEFAULT_SPEC,
     SPECS,
     Quote,
     QuoteResult,
     aliyun_signature,
     compare,
+    extract_promo_lines,
+    fetch_activities,
     fetch_aliyun_price,
     fetch_tencent_price,
     tencent_authorization,
@@ -29,6 +32,7 @@ from .settings import (
 from .sources import ALL_SOURCES, resolve, resolve_many
 
 __all__ = [
+    "ACTIVITY_SITES",
     "ALL_SOURCES",
     "DEFAULT_SPEC",
     "SPECS",
@@ -44,6 +48,8 @@ __all__ = [
     "cluster_hits",
     "compare",
     "configure",
+    "extract_promo_lines",
+    "fetch_activities",
     "fetch_aliyun_price",
     "fetch_tencent_price",
     "get_logger",

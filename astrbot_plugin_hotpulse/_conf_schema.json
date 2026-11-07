@@ -60,9 +60,9 @@
   },
   "cloud_enabled": {
     "type": "bool",
-    "description": "云服务器比价",
-    "hint": "每天定时对比阿里云/腾讯云同规格服务器的官方价。填了下面的密钥才会真正查询。",
-    "default": false
+    "description": "云活动 + 比价推送",
+    "hint": "每天定时推一次三家云厂商的活动速览（不需要密钥）；如果填了下面的密钥，会再附一段同规格精确比价。",
+    "default": true
   },
   "cloud_time": {
     "type": "string",

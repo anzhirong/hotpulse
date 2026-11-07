@@ -977,3 +977,70 @@ def test_maybe_cloud_respects_switch(tmp_path, monkeypatch):
 def test_times_of_ignores_garbage():
     plugin = make_plugin(Path(".") / "unused", [], [], config={"cloud_time": "9:10，25:99, xx"})
     assert plugin._times_of("cloud_time") == ["09:10"]
+
+
+# ---------- 云活动速览 ----------
+
+
+def test_extract_promo_lines_keeps_price_drops_noise():
+    html = """
+    <html><head><style>.a{color:red}</style><script>var x = "99元";</script></head>
+    <body>
+      <div>登录</div><div>京ICP备12345号</div>
+      <div>轻量应用服务器 4核4G 新客 38元/年起</div>
+      <div>云服务器秒杀专场，低至 5 折</div>
+      <div>这是一段完全无关的介绍文字用于测试过滤逻辑是否正常工作</div>
+      <div>29.9 元起</div>
+    </body></html>
+    """
+    lines = core.extract_promo_lines(html)
+    joined = " | ".join(lines)
+    assert "38元/年起" in joined
+    assert "低至 5 折" in joined
+    assert "登录" not in joined
+    assert "ICP" not in joined
+    assert "完全无关的介绍文字" not in joined
+    assert "var x" not in joined  # script 里的内容不能被当成文案
+
+
+def test_extract_promo_lines_honours_limit():
+    html = "<div>" + "</div><div>".join(f"第{i}款机型 9{i}元" for i in range(30)) + "</div>"
+    assert len(core.extract_promo_lines(html, limit=5)) == 5
+
+
+def test_parse_activity_summary_by_vendor():
+    text = """阿里云：双11 主推 AI 产品，Token Plan 低至 5 折
+腾讯云: 轻量 4核4G 新客 38 元/年起
+华为云：未见明价
+这段话没有厂商标识，应该被丢弃
+"""
+    got = main._parse_activity_summary(text, ["阿里云", "腾讯云", "华为云"])
+    assert got["阿里云"].startswith("双11 主推 AI")
+    assert got["腾讯云"].startswith("轻量 4核4G")  # 半角冒号也认
+    assert got["华为云"] == "未见明价"
+    assert len(got) == 3
+
+
+def test_render_activity_with_summary():
+    pages = {
+        "阿里云": {"url": "https://a", "lines": ["低至5折"]},
+        "腾讯云": {"url": "https://b", "lines": []},
+    }
+    text = main._render_activity(pages, {"阿里云": "主推 AI，低至 5 折"})
+    assert "阿里云：主推 AI，低至 5 折" in text
+    assert "腾讯云" not in text.split("⚠️")[0]  # 没内容的不硬凑
+    assert "以页面为准" in text
+    assert "https://a" in text
+
+
+def test_render_activity_falls_back_to_raw_snippets():
+    """没配模型时不能什么都看不到，退回原始片段。"""
+    pages = {"华为云": {"url": "https://c", "lines": ["云服务器新客 49.91元", "V0新客专享"]}}
+    text = main._render_activity(pages, {})
+    assert "华为云：云服务器新客 49.91元" in text
+
+
+def test_render_activity_when_all_empty():
+    pages = {"阿里云": {"url": "https://a", "lines": []}}
+    text = main._render_activity(pages, {})
+    assert "都没抓到" in text

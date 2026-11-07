@@ -69,6 +69,7 @@ SubscriptionStore = _core.SubscriptionStore
 match_title = _core.match_title
 cluster_hits = _core.cluster_hits
 cloud_compare = _core.compare
+cloud_activities = _core.fetch_activities
 CLOUD_SPECS = _core.SPECS
 DEFAULT_SPEC = _core.DEFAULT_SPEC
 split_def = _core.split_def
@@ -131,6 +132,14 @@ _BRIEF_LINE = re.compile(r"^\s*(\d{1,2})\s*[.、)．]\s*(.+?)\s*$")
 _DIGEST_SYSTEM = (
     "下面是用户关注主题今天在热榜上的标题。用 2 到 3 句中文概括这批人都在聊什么，"
     "可以归类但不能编造标题里没有的事实、数字、结论。总长 80 字以内，直接给结论，不要客套。"
+)
+
+# 云活动归纳：片段本身就是碎的，只要求它别添油加醋
+_ACTIVITY_SYSTEM = (
+    "下面是云厂商活动页里抓到的文案片段，可能有残缺、重复、和云服务器无关（比如 AI 产品）。"
+    "按厂商各写 1-2 句：在推什么、大概什么价、有没有新客限制。"
+    "数字必须照抄片段里出现的，片段没写价格就写「未见明价」，不要推测。"
+    "每行一个厂商，格式「厂商：内容」，总长 150 字以内。不要客套，不要分点。"
 )
 
 
@@ -236,7 +245,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.7.0")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.8.0")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -380,6 +389,13 @@ class HotPulsePlugin(Star):
         spec = next((t for t in tokens if t in CLOUD_SPECS), DEFAULT_SPEC)
         results, skipped = await cloud_compare(spec)
         yield event.plain_result(_render_cloud(results, spec, skipped))
+
+    @filter.command("云活动", alias={"云优惠", "云促销"})
+    async def cloud_activity(self, event: AstrMessageEvent):
+        """看三家云厂商活动页现在在推什么。用法：/云活动"""
+        pages = await cloud_activities()
+        summary = await self._activity_summary(pages)
+        yield event.plain_result(_render_activity(pages, summary))
 
     # 自然语言入口：用户说「我想看 AI 相关热点」时，由模型自己决定调这个工具，
     # 不需要记 /热点 搜 这种指令。参数 schema 是从下面的 docstring 解析出来的，
@@ -800,8 +816,25 @@ class HotPulsePlugin(Star):
                 times.append(slot)
         return times
 
+    async def _activity_summary(self, pages: dict[str, dict]) -> dict[str, str]:
+        """让模型把三家活动页的碎片按厂商归纳成 1-2 句。
+
+        模型不可用时返回空字典，调用方会退回原始片段——不能因为没配模型就什么都看不到。
+        """
+        feed: list[str] = []
+        for vendor, page in pages.items():
+            snippets = page.get("lines") or []
+            if not snippets:
+                continue
+            feed.append(f"【{vendor}】")
+            feed.extend(f"- {s}" for s in snippets[:12])
+        if not feed:
+            return {}
+        text = await self._model_text("\n".join(feed), _ACTIVITY_SYSTEM)
+        return _parse_activity_summary(text, list(pages))
+
     async def _maybe_cloud(self):
-        """到点推一次云服务器比价。没有会话或没填密钥就不折腾。"""
+        """到点推一次云活动速览（有密钥时附带同规格比价）。"""
         store = self._store
         if store is None or not store.sessions:
             return
@@ -824,20 +857,27 @@ class HotPulsePlugin(Star):
         store.digest_sent.append(key)
         store.save()
 
-        results, skipped = await cloud_compare(spec)
-        if not results:
-            logger.info("hotpulse %s 云比价：没填任何密钥，跳过", slot)
-            return
+        # 活动速览不需要密钥，先抓这个
+        pages = await cloud_activities()
+        summary = await self._activity_summary(pages)
+        parts = [_render_activity(pages, summary)]
 
-        text = _render_cloud(results, spec, skipped)
+        # 填了密钥才做精确比价，两条消息合成一条，别一天刷两次
+        results, skipped = await cloud_compare(spec)
+        if results:
+            parts.append(_render_cloud(results, spec, skipped))
+        else:
+            logger.info("hotpulse %s 没填云密钥，只推活动速览", slot)
+
+        text = "\n\n".join(parts)
         delivered = 0
         for session in list(store.sessions):
             try:
                 ok = await self.context.send_message(session, MessageChain().message(text))
                 delivered += 1 if ok else 0
             except Exception as exc:
-                logger.warning(f"hotpulse 云比价推送到 {session} 失败：{exc}")
-        logger.info("hotpulse %s 云比价（%s）送达 %d 个会话", slot, spec, delivered)
+                logger.warning(f"hotpulse 云信息推送到 {session} 失败：{exc}")
+        logger.info("hotpulse %s 云信息送达 %d 个会话", slot, delivered)
 
     async def _maybe_digest(self):
         store = self._store
@@ -1130,6 +1170,55 @@ def _render_digest(clusters, limit: int, summary: str = "", times: str = "") -> 
     lines.append(f"· {when}，可在插件配置的 digest_time 调整")
     if summary:
         lines.append("· 💭 = AI 根据标题概括，不是原文")
+    return "\n".join(lines)
+
+
+def _parse_activity_summary(text: str, vendors: list[str]) -> dict[str, str]:
+    """把模型输出按「厂商：内容」拆开。认不出厂商名的行直接扔掉。"""
+    result: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("-·• ").strip()
+        if not line:
+            continue
+        for vendor in vendors:
+            if not line.startswith(vendor):
+                continue
+            body = line[len(vendor) :].lstrip("：:，, ").strip()
+            if len(body) >= 4:
+                result[vendor] = body if len(body) <= 90 else body[:90] + "…"
+            break
+    return result
+
+
+def _render_activity(pages: dict[str, dict], summary: dict[str, str]) -> str:
+    """活动速览。没拿到 AI 归纳时，退回原始片段，别让用户什么都看不到。"""
+    lines = [f"📉 云活动速览 · {datetime.now():%m-%d %H:%M}", ""]
+    got_any = False
+
+    for vendor, page in pages.items():
+        body = summary.get(vendor, "")
+        if not body:
+            snippets = page.get("lines") or []
+            if not snippets:
+                continue
+            body = " / ".join(snippets[:2])
+        if not body:
+            continue
+        got_any = True
+        lines.append(f"{vendor}：{body}")
+
+    if not got_any:
+        lines.append("这次三家活动页都没抓到有用的内容。")
+        lines.append("可能是页面改版或网络波动，稍后再试。")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append("⚠️ 摘自各厂商活动页文案，多为新客/限时价，下单前以页面为准。")
+    for vendor, page in pages.items():
+        if page.get("url"):
+            lines.append(f"{vendor} {page['url']}")
+    lines.append("")
+    lines.append("· 同规格精确对比：/云价 2核4G")
     return "\n".join(lines)
 
 
