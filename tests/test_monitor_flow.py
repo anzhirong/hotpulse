@@ -14,6 +14,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1] / "astrbot_plugin_hotpulse"
 
 
@@ -353,3 +355,44 @@ def test_migrate_old_store_copies_when_target_missing(tmp_path):
     assert main._migrate_old_store(target, old) is True
     assert "AI" in target.read_text(encoding="utf-8")
     assert old.exists()  # 老文件留着，万一新目录后面出问题还能找回来
+
+
+# ---------- 升级时重新加载 core ----------
+
+
+def test_stale_core_module_does_not_break_reload():
+    """线上真实踩到的坑：AstrBot 换完文件重新 import 插件时，sys.modules 里
+    还留着上一版注册的 core 包（没有 SubscriptionStore），旧代码直接复用，
+    报 "module 'astrbot_plugin_hotpulse_core' has no attribute SubscriptionStore"。
+    """
+    sys.modules["astrbot_plugin_hotpulse_core"] = types.ModuleType("astrbot_plugin_hotpulse_core")
+    sys.modules["astrbot_plugin_hotpulse_core.fetcher"] = types.ModuleType("stale.fetcher")
+
+    spec = importlib.util.spec_from_file_location("hp_main_reload", PLUGIN_DIR / "main.py")
+    reloaded = importlib.util.module_from_spec(spec)
+    sys.modules["hp_main_reload"] = reloaded
+    spec.loader.exec_module(reloaded)
+
+    fresh = sys.modules["astrbot_plugin_hotpulse_core"]
+    for name in ("SubscriptionStore", "HotPulseFetcher", "cluster_hits", "match_title"):
+        assert hasattr(fresh, name), name
+    assert "astrbot_plugin_hotpulse_core.fetcher" in sys.modules  # 子模块也跟着重建了
+    assert fresh.SubscriptionStore is not None
+
+
+def test_half_built_core_is_removed_from_sys_modules(tmp_path, monkeypatch):
+    """core 执行到一半抛异常时，半成品不能留在 sys.modules 里毒化下次加载。"""
+    bad_dir = tmp_path / "core"
+    bad_dir.mkdir()
+    (bad_dir / "__init__.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+
+    real_file = main.__file__
+    monkeypatch.setattr(main, "__file__", str(tmp_path / "main.py"))
+    sys.modules.pop("astrbot_plugin_hotpulse_core", None)
+    try:
+        with pytest.raises(RuntimeError):
+            main._load_core()
+        assert "astrbot_plugin_hotpulse_core" not in sys.modules
+    finally:
+        monkeypatch.setattr(main, "__file__", real_file)
+        main._load_core()  # 恢复成真的 core，后面的用例还要用

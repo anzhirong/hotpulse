@@ -28,8 +28,18 @@ _CORE_PKG = "astrbot_plugin_hotpulse_core"
 
 
 def _load_core():
-    if _CORE_PKG in sys.modules:
-        return sys.modules[_CORE_PKG]
+    """加载随插件分发的核心包。
+
+    这里**不能**只在 sys.modules 里查一下就复用。AstrBot 升级插件是「先把新文件
+    换上去，再重新 import 插件」的，进程里还留着上一版注册的
+    astrbot_plugin_hotpulse_core；直接复用就会拿到旧对象，然后报
+    「module ... has no attribute SubscriptionStore」（v1.0.0 的核心包里没有它）。
+
+    所以每次加载先把整包从 sys.modules 里清掉，再从磁盘重新执行一遍。
+    核心包只有几十 KB，这点开销远小于一次排查。
+    """
+    for name in [n for n in sys.modules if n == _CORE_PKG or n.startswith(_CORE_PKG + ".")]:
+        del sys.modules[name]
 
     core_dir = Path(__file__).resolve().parent / "core"
     spec = importlib.util.spec_from_file_location(
@@ -41,8 +51,14 @@ def _load_core():
         raise ImportError(f"无法加载插件核心目录：{core_dir}")
 
     module = importlib.util.module_from_spec(spec)
+    # 相对导入要求父包已经在 sys.modules 里，所以必须先注册再执行
     sys.modules[_CORE_PKG] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # 执行到一半失败时把半成品撤掉，否则会毒化下一次加载
+        sys.modules.pop(_CORE_PKG, None)
+        raise
     return module
 
 
@@ -160,7 +176,7 @@ def _migrate_old_store(target: Path, old: Path | None = None) -> bool:
     return True
 
 
-@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.2")
+@register("hotpulse", "anzhirong", "多平台热点聚合查询", "1.3.3")
 class HotPulsePlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
